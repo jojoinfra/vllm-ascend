@@ -1,15 +1,11 @@
 """CPU regression for native W1/W3 ordering and preserving E2M1/E8M0 payload bytes."""
 
-import importlib.util
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-if importlib.util.find_spec("dsv41_stage2") is not None:
-    from vllm_ascend.models.deepseek_v41.expert_weights import install_expert_weights
-else:
-    from vllm_ascend.models.deepseek_v41.expert_weights import install_expert_weights
+from vllm_ascend.models.deepseek_v41.expert_weights import install_expert_weights
 
 
 def matrices(n, k, code, scale):

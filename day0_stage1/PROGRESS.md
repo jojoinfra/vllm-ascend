@@ -27,3 +27,4 @@
 | 2026-11-10 | 首次八卡阶段二候选已从普通 CLI 加载目标模型、独立的 DSpark 权重和所有 rank 的原生 MoE runner。启动 forward 中，ALL2ALLV 的 MX scale 张量与按 token 切分的通信尺寸不符，服务未进入 HTTP；已保留该轮及权重账本。 | [EP 分发](../vllm_ascend/ops/fused_moe/token_dispatcher.py) |
 | 2026-11-10 | A5 单卡验证了动态 FP8 激活的 scale 算法。在含零值与量化边界的合成 BF16 块上，scale_alg=1 的所有 E4M3 码与所有非零组 scale 对齐 HF 参考，已按 V4.1 文本类型接入现有硬件能力选择。 | [量化选择](../vllm_ascend/quantization/utils.py) · [回归用例](../tests/ut/quantization/test_utils.py) |
 | 2026-11-10 | DSpark 现在保留本步未排到的请求。槽位需要让给其他请求时保存已提交草稿 KV，恢复调度时按原请求还原，可继续验证或回绕。 | [请求状态与回归](../tests/ut/models/test_deepseek_v41_spec_runner.py) |
+| 2026-11-10 | 专家字节布局回归已统一从发行包导入，覆盖跨 rank 范围、W1/W3 顺序、E2M1 原码与 UE8M0 边界。 | [权重回归](../tests/ut/models/test_deepseek_v41_expert_weights.py) |
