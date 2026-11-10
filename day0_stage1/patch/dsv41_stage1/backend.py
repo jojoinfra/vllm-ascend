@@ -139,38 +139,48 @@ class Engram(nn.Module):
         return (h + gate.unsqueeze(-1) * value.float().unsqueeze(-2)).to(x.dtype)
 
 
-def precompute_freqs_cis(dim, seqlen, original_seq_len, base, factor, beta_fast, beta_slow) -> torch.Tensor:
+@lru_cache(2)
+def precompute_freqs_cis(dim, seqlen, original_seq_len, base, factor, beta_fast, beta_slow, device) -> torch.Tensor:
     """Rotary frequencies as complex exponentials, one row per position.
 
     With original_seq_len > 0 this applies YaRN: dimensions whose wavelength already fits inside the
     training context keep their frequency, those far beyond it are divided by `factor`, and the
     `beta_fast`..`beta_slow` band in between is faded across with a linear ramp.
     """
-    freqs = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
-    if original_seq_len > 0:
-        # the dim whose wavelength completes `rotations` turns over the training context
-        def corrected_dim(rotations):
-            return dim * math.log(original_seq_len / (rotations * 2 * math.pi)) / (2 * math.log(base))
+    with torch.device("cpu"):
+        freqs = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+        if original_seq_len > 0:
+            # the dim whose wavelength completes `rotations` turns over the training context
+            def corrected_dim(rotations):
+                return dim * math.log(original_seq_len / (rotations * 2 * math.pi)) / (2 * math.log(base))
 
-        low = max(math.floor(corrected_dim(beta_fast)), 0)
-        high = min(math.ceil(corrected_dim(beta_slow)), dim - 1)
-        ramp = ((torch.arange(dim // 2, dtype=torch.float32) - low) / max(high - low, 1e-3)).clamp(0, 1)
-        smooth = 1 - ramp
-        freqs = freqs / factor * (1 - smooth) + freqs * smooth
+            low = max(math.floor(corrected_dim(beta_fast)), 0)
+            high = min(math.ceil(corrected_dim(beta_slow)), dim - 1)
+            ramp = ((torch.arange(dim // 2, dtype=torch.float32) - low) / max(high - low, 1e-3)).clamp(0, 1)
+            smooth = 1 - ramp
+            freqs = freqs / factor * (1 - smooth) + freqs * smooth
 
-    freqs = torch.outer(torch.arange(seqlen), freqs)
-    return torch.stack((freqs.cos(), freqs.sin()), dim=-1)
-
+        freqs = torch.outer(torch.arange(seqlen), freqs)
+        phases = torch.polar(torch.ones_like(freqs), freqs)
+    return torch.view_as_real(phases).to(device)
 
 def apply_rotary_emb(x, freqs_cis, inverse=False):
     pairs = x.float().unflatten(-1, (-1, 2))
-    cos, sin = freqs_cis.unbind(-1)
     if x.ndim == 4:
-        cos, sin = cos.unsqueeze(1), sin.unsqueeze(1)
-    if inverse:
-        sin = -sin
-    real, imag = pairs.unbind(-1)
-    rotated = torch.stack((real * cos - imag * sin, imag * cos + real * sin), dim=-1)
+        freqs_cis = freqs_cis.unsqueeze(1)
+    if x.device.type == "cpu":
+        phase = torch.view_as_complex(freqs_cis)
+        rotated = torch.view_as_real(torch.view_as_complex(pairs) * (phase.conj() if inverse else phase))
+    else:
+        # Keep the table and the multiply on device, using real FP32 operations
+        # for the complex rotation. Match the fused product before BF16 rounding.
+        cos, sin = freqs_cis.unbind(-1)
+        if inverse:
+            sin = -sin
+        real, imag = pairs.unbind(-1)
+        rot_r = torch.addcmul(-(imag * sin), real, cos)
+        rot_i = torch.addcmul(imag * cos, real, sin)
+        rotated = torch.stack((rot_r, rot_i), dim=-1)
     x.copy_(rotated.flatten(-2))
     return x
 
@@ -463,6 +473,7 @@ class Attention(nn.Module):
             args.rope_factor,
             args.beta_fast,
             args.beta_slow,
+            self.window_kv_cache.device,
         )
         self.freqs_cis: torch.Tensor
         self.register_buffer("freqs_cis", freqs_cis, persistent=False)
