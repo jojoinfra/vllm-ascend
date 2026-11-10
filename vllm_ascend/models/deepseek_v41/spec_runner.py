@@ -39,18 +39,41 @@ class RequestSlots:
         self.capacity = capacity
         self.slots = {}
         self.last = {}
+        self.suspended = {}
 
-    def assign(self, request_ids):
-        if len(request_ids) > self.capacity or len(set(request_ids)) != len(request_ids):
+    def assign(self, request_ids, *, live_requests=None, model=None):
+        active = set(request_ids)
+        if len(request_ids) > self.capacity or len(active) != len(request_ids):
             raise ValueError("invalid active request set")
-        for req in self.slots.keys() - set(request_ids):
-            del self.slots[req]
+        live = active if live_requests is None else active.union(live_requests)
+        for req in self.last.keys() - live:
+            self.slots.pop(req, None)
+            self.suspended.pop(req, None)
             del self.last[req]
-        free = iter(sorted(set(range(self.capacity)) - set(self.slots.values())))
+        free = set(range(self.capacity)) - set(self.slots.values())
         for req in request_ids:
-            if req not in self.slots:
-                self.slots[req] = next(free)
-                self.last[req] = -1
+            if req in self.slots:
+                continue
+            if free:
+                slot = min(free)
+                free.remove(slot)
+            else:
+                # InputBatch can temporarily drop an unfinished request. Preserve
+                # its committed prefix before reusing the row; upon resume, even a
+                # scheduler rewind into an earlier window can be served correctly.
+                parked = next(r for r in self.slots if r not in active)
+                slot = self.slots[parked]
+                limit = self.last[parked] + 1
+                self.suspended[parked] = tuple(
+                    block.attn.window_kv_cache[slot, :limit].to(device="cpu", copy=True) for block in model.mtp
+                )
+                del self.slots[parked]
+            if req in self.suspended:
+                for block, saved in zip(model.mtp, self.suspended[req], strict=True):
+                    block.attn.window_kv_cache[slot, : len(saved)].copy_(saved)
+                del self.suspended[req]
+            self.slots[req] = slot
+            self.last.setdefault(req, -1)
 
     def commit(self, req, positions, retained, max_context):
         if not positions or positions[0] < 0 or positions[-1] >= max_context:
@@ -172,7 +195,7 @@ def _make_proposer_type(native_base):
             if aux is None or aux.ndim != 2 or aux.shape[-1] != self.model.mtp[0].main_proj.weight.shape[-1]:
                 raise ValueError("missing V4.1 target inputs for the configured auxiliary layers")
             reqs = list(self.v41_runner.input_batch.req_ids)
-            self.ledger.assign(reqs)
+            self.ledger.assign(reqs, live_requests=self.v41_runner.requests, model=self.model)
             if torch.is_tensor(sampled):
                 sampled = sampled.tolist()
             if len(sampled) != len(reqs):

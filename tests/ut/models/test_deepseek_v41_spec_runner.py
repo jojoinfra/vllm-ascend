@@ -54,7 +54,9 @@ def test_worker_keeps_only_verified_rows_when_two_requests_are_reordered():
 
     class ToyDraft:
         k = 2
-        mtp = [SimpleNamespace(main_proj=SimpleNamespace(weight=torch.empty(3, 4)))]
+
+        def __init__(self):
+            self.mtp = [SimpleNamespace(main_proj=SimpleNamespace(weight=torch.empty(3, 4)))]
 
         def commit_target(self, aux, slots, pos):
             self.last_commit = list(zip(slots.tolist(), pos.tolist(), aux[:, 0].tolist()))
@@ -91,6 +93,11 @@ def test_worker_keeps_only_verified_rows_when_two_requests_are_reordered():
     ) == [[2, 3], [8, 9]]
     assert proposer.model.last_commit == [(1, 2, 8.0), (1, 3, 9.0), (1, 4, 10.0), (0, 2, 11.0), (0, 3, 12.0)]
     assert proposer.ledger.last == {"a": 3, "b": 4}
+
+    proposer.vllm_config.model_config.max_model_len = 8
+    assert step([[5], [1]], {"b": 1, "a": 1}, {}, [5, 4], [13.0, 14.0]) == [[], [2, 3]]
+    assert proposer.model.last_commit == [(1, 5, 13.0), (0, 4, 14.0)]
+    assert proposer.ledger.last == {"a": 4, "b": 5}
 
 
 def test_context_fit_is_per_request_and_each_fallback_enters_draft_once(monkeypatch):
@@ -147,3 +154,23 @@ def test_context_fit_is_per_request_and_each_fallback_enters_draft_once(monkeypa
             assert runner.drafter.blocks_completed == before + 1
     runner.drafter = object()
     assert not runner._input_fits_in_drafter(object())
+
+
+def test_parked_request_restores_committed_prefix_across_eviction_and_rewind():
+    cache = torch.zeros(1, 8, 2)
+    draft = SimpleNamespace(mtp=[SimpleNamespace(attn=SimpleNamespace(window_kv_cache=cache))])
+    state = RequestSlots(1)
+    state.assign(["old"], live_requests={"old"}, model=draft)
+    original = torch.arange(8, dtype=cache.dtype).reshape(4, 2)
+    cache[0, :4] = original
+    state.commit("old", [0, 1, 2, 3], 4, 8)
+    state.assign(["new"], live_requests={"old", "new"}, model=draft)
+    cache[0, :4].fill_(-1)
+    state.commit("new", [0], 1, 8)
+    state.assign(["old"], live_requests={"old", "new"}, model=draft)
+    assert torch.equal(cache[0, :4], original)
+    assert state.last["old"] == 3
+    state.commit("old", [2, 3], 1, 8)
+    assert state.last["old"] == 2
+    state.assign(["old"], live_requests={"old"}, model=draft)
+    assert not state.suspended and "new" not in state.last
