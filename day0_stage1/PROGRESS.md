@@ -28,3 +28,4 @@
 | 2026-11-10 | A5 单卡验证了动态 FP8 激活的 scale 算法。在含零值与量化边界的合成 BF16 块上，scale_alg=1 的所有 E4M3 码与所有非零组 scale 对齐 HF 参考，已按 V4.1 文本类型接入现有硬件能力选择。 | [量化选择](../vllm_ascend/quantization/utils.py) · [回归用例](../tests/ut/quantization/test_utils.py) |
 | 2026-11-10 | DSpark 现在保留本步未排到的请求。槽位需要让给其他请求时保存已提交草稿 KV，恢复调度时按原请求还原，可继续验证或回绕。 | [请求状态与回归](../tests/ut/models/test_deepseek_v41_spec_runner.py) |
 | 2026-11-10 | 专家字节布局回归已统一从发行包导入，覆盖跨 rank 范围、W1/W3 顺序、E2M1 原码与 UE8M0 边界。 | [权重回归](../tests/ut/models/test_deepseek_v41_expert_weights.py) |
+| 2026-11-10 | 阶段二并发 HTTP 检查器复用阶段一冻结的问答检查，同时发起独立对话，核验不同请求 ID 与实际重叠。传输自测通过。 | [并发检查器](../day0_stage2/validator/check_concurrent_chat.py) |
