@@ -17,6 +17,7 @@ from vllm_ascend.models.deepseek_v41.engram import HostEngramEmbedding
 from .decode_state import DecodeInputs, PagedHistory
 from .graph_ops import LayerPages, paged_attention
 from .model import AscendDeepseekV41ForCausalLM
+from .page_pool import AutoPagedMetadata
 
 LOG = logging.getLogger(__name__)
 
@@ -91,8 +92,6 @@ class DeepseekV41Stage2ForCausalLM(AscendDeepseekV41ForCausalLM):
             raise ValueError("V4.1 full-graph stage requires EP8 and PCP1")
         if cache.enable_prefix_caching:
             raise ValueError("Stage two text n-grams require prefix caching disabled")
-        if cache.num_gpu_blocks_override is None:
-            raise ValueError("The model and scheduler require the same bounded physical page pool")
         group = get_ep_group()
         if group.world_size != 8:
             raise ValueError("Expected an eight-device expert group")
@@ -114,9 +113,14 @@ class DeepseekV41Stage2ForCausalLM(AscendDeepseekV41ForCausalLM):
         # window. Its scheduling group must retain every page of the prefix.
         full_history_cache = copy(cache)
         full_history_cache.sliding_window = None
-        self.metadata_layer = Attention(
-            1, 128, 128**-0.5, num_kv_heads=1, cache_config=full_history_cache, prefix=self.metadata_key
-        )
+        marker_args = dict(num_kv_heads=1, cache_config=full_history_cache, prefix=self.metadata_key)
+        if cache.num_gpu_blocks_override is None:
+            private_bytes = sum(
+                LayerPages.bytes_per_block(block.attn, cache.block_size) for block in self.backbone.layers
+            )
+            self.metadata_layer = AutoPagedMetadata(1, 128, 128**-0.5, private_page_bytes=private_bytes, **marker_args)
+        else:
+            self.metadata_layer = Attention(1, 128, 128**-0.5, **marker_args)
         self.dim = self.backbone.dim
         self.history = PagedHistory(m.max_model_len, cache.block_size, cache.num_gpu_blocks_override)
         self.engram_layers = [b.engram for b in self.backbone.layers if b.engram is not None]
@@ -135,6 +139,36 @@ class DeepseekV41Stage2ForCausalLM(AscendDeepseekV41ForCausalLM):
         self.moe_prefix = f"{prefix + '.' if prefix else ''}model.layers"
         self._inside_full_wrapper = False
         self._warming_full_decode_graph = False
+
+    def prepare_device_kv_cache(self, config, max_model_len):
+        if not isinstance(self.metadata_layer, AutoPagedMetadata):
+            return config
+        device_config = self.metadata_layer.device_marker_config(config)
+        if self.history.num_blocks:
+            if self.history.num_blocks != config.num_blocks or self.history.max_len != max_model_len:
+                raise RuntimeError("Cannot resize bound V4.1 KV pages while graph addresses are live")
+            return device_config
+        if device_config.kv_cache_groups[0].kv_cache_spec.block_size != self.history.block_size:
+            raise ValueError("The scheduler and V4.1 attention use different physical block sizes")
+        if max_model_len > self.history.max_len:
+            raise ValueError("The model runner exceeds the V4.1 maximum sequence length")
+        history = PagedHistory(max_model_len, self.history.block_size, config.num_blocks)
+        # Profile tensors contained only scratch. Drop them before allocating the
+        # final tables so the peak does not include two full sets of scratch.
+        self.layer_pages.clear()
+        try:
+            pages = [
+                LayerPages(block.attn, self.stage, physical_slots=history.num_slots) for block in self.backbone.layers
+            ]
+        except RuntimeError:
+            self.layer_pages = [LayerPages(block.attn, self.stage) for block in self.backbone.layers]
+            raise
+        self.stage.pages = self.stage.pages[:, : history.num_pages]
+        self.stage.slots.copy_(self.stage.serial + history.num_slots)
+        self.history = history
+        self.stage.history = history
+        self.layer_pages = pages
+        return device_config
 
     def finalize_after_load(self, receipt_dir=None):
         from .fused_moe import install_native_layers

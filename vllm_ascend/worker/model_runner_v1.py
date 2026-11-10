@@ -4253,6 +4253,16 @@ class NPUModelRunner(GPUModelRunner):
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
+        # A V4.1 automatic pool includes the target's window, compressor and
+        # indexer in its scheduler page. Only its metadata marker goes through
+        # the generic K/V tensor allocation below.
+        if (
+            self.cache_config.num_gpu_blocks_override is None
+            and getattr(self.model_config.hf_text_config, "model_type", None) == "deepseek_v41_text"
+        ):
+            prepare = getattr(self.get_model(), "prepare_device_kv_cache", None)
+            if prepare is not None:
+                kv_cache_config = prepare(kv_cache_config, self.max_model_len)
         # Initialize the memory buffer for KV cache
         kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
         # Change the memory buffer to the desired shape

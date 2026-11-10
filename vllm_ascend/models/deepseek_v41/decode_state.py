@@ -34,13 +34,15 @@ class PagedHistory:
     """Only real scheduler pages own state. Stale speculative suffixes are never read."""
 
     def __init__(self, max_len, block_size, num_blocks):
-        if min(max_len, block_size, num_blocks) <= 0 or block_size % 2:
+        if min(max_len, block_size) <= 0 or block_size % 2 or (num_blocks is not None and num_blocks <= 0):
             raise ValueError("Expected a positive, even KV page size")
         self.max_len = max_len
         self.block_size = block_size
-        self.num_blocks = num_blocks
+        # Before vLLM profiles memory it has no physical pool. The dummy
+        # forward may use scratch slots but cannot admit a scheduler address.
+        self.num_blocks = 0 if num_blocks is None else num_blocks
         self.num_pages = math.ceil(max_len / block_size)
-        self.num_slots = block_size * num_blocks
+        self.num_slots = block_size * self.num_blocks
         self.tokens = np.full(self.num_slots, -1, dtype=np.int64)
 
     def plan(self, positions, slots, block_tables, query_ends):
@@ -77,7 +79,7 @@ class PagedHistory:
             needed = np.arange(columns) < lengths[:, None]
             pages = np.where(needed, tables[rows, :columns], 0)
             if pages.min() < 0 or pages.max() >= self.num_blocks:
-                raise ValueError("Physical block ID is outside --num-gpu-blocks-override")
+                raise ValueError("Physical block ID is outside the scheduler page pool")
             token_pages[np.flatnonzero(active), :columns] = pages
             physical = pages[np.arange(len(rows)), lengths - 1] * self.block_size
             physical += positions[active] % self.block_size

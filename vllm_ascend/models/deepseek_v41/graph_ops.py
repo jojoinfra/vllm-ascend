@@ -23,22 +23,26 @@ def _fp4(x, lut, width=32, e4scale=False):
 
 
 class LayerPages:
-    def __init__(self, attn, inputs):
-        count = inputs.history.num_slots
-        tmp = inputs.max_tokens
-        device = inputs.device
-
-        def table(entries, dim, dtype=torch.bfloat16):
-            return torch.zeros((entries + tmp, dim), device=device, dtype=dtype)
-
-        self.window = table(count, attn.head_dim)
+    @staticmethod
+    def layout(attn):
+        """Yield table name, tokens per stored row, row width and element type."""
+        yield "window", 1, attn.head_dim, torch.bfloat16
         if attn.is_kv_source:
-            groups = count // attn.compress_ratio
-            self.compressed = table(groups, attn.head_dim)
-            self.index = table(groups, attn.indexer.index_head_dim)
+            yield "compressed", attn.compress_ratio, attn.head_dim, torch.bfloat16
+            yield "index", attn.compress_ratio, attn.indexer.index_head_dim, torch.bfloat16
             if attn.compress_ratio == 2:
-                self.first_kv = table(groups, attn.head_dim, torch.float32)
-                self.first_score = table(groups, attn.head_dim, torch.float32)
+                yield "first_kv", 2, attn.head_dim, torch.float32
+                yield "first_score", 2, attn.head_dim, torch.float32
+
+    def __init__(self, attn, inputs, *, physical_slots=None):
+        count = inputs.history.num_slots if physical_slots is None else physical_slots
+        for name, ratio, width, dtype in self.layout(attn):
+            rows = count // ratio + inputs.max_tokens
+            setattr(self, name, torch.zeros((rows, width), device=inputs.device, dtype=dtype))
+
+    @classmethod
+    def bytes_per_block(cls, attn, block_size):
+        return sum(block_size // ratio * width * dtype.itemsize for _, ratio, width, dtype in cls.layout(attn))
 
 
 def _store_source(attn, x, state, pages):
