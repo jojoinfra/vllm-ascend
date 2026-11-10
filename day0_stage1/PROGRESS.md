@@ -41,3 +41,4 @@
 | 2026-11-10 | 真实请求记录发现 AISBench 默认用第一道正式题预热，再次发送同题。已停止首轮评测，保留请求记录，未计分。评测启动器现显式传入 `--num-warmups 0`，指定镜像中重新解析后的官方任务配置确认预热次数为零。 | [评测启动器](../day0_stage2/validator/aisbench_gsm8k.py) |
 | 2026-11-10 | 按 HF 的顺序把 FP32 路由系数乘在 SwiGLU 后、W2 的量化前，保留真实分发、两次 grouped matmul 和原生融合算子。V4.1 共享专家的两次激活量化也已对齐。单卡真实层 A/B 中共享专家逐值一致，整层最大绝对差从 1 降到 0.125；换输入图回放与 eager 逐值一致。多卡路径待完整复验。 | [加权专家](../vllm_ascend/models/deepseek_v41/weighted_experts.py) · [分发回归](../tests/ut/models/test_deepseek_v41_weighted_experts.py) |
 | 2026-11-10 | 按任务方更新的范围，本阶段暂缓 shared_expert_dp_enabled 和 sequence_parallel_enabled 的适配。两项登记实测值，均可为 false；本地共享专家数值、路由专家 EP8 真实通信及其余服务和评测项目继续验收。 | [现行计划](PLAN.md#tp1-的共享专家与通信) |
+| 2026-11-10 | 新增八卡逐路由系数检查。对主干与草稿分别实测 MC2 和 ALL2ALLV，发送端的 FP32 系数逐位到达正确专家，反向合并每条路由只乘一次。修正前的同源码目标/投机服务已分别生成 18 个诊断 token，在第 7 个输出首次分歧；修正后的完整候选正在重验。 | [八卡检查](../day0_stage2/validator/verify_expert_coefficients.py) · [token 对照](../day0_stage2/validator/check_deterministic_decode.py) |
