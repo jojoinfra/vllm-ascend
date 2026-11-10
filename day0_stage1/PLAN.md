@@ -18,3 +18,7 @@
 先检查各 rank 的目标和草稿权重、原生 experts runner、实际通信方式与图捕获。服务就绪后重放阶段一四问，并同时发起独立请求。记录有实际请求时的 decode replay、已接收与被拒绝的草稿 token、拒绝后的请求状态以及共享专家的放置和通信。开关是否生效由运行路径判断。[并发功能检查](../day0_stage2/validator/check_concurrent_chat.py)
 
 独立 AISBench 客户端先核验官方评分器和输入顺序，支持用 `--dry-run` 检查最终任务配置。正式请求记录题目 ID、HTTP 状态、模型输出和在途数，并与 AISBench 逐题评分对照。题量、并发数、分数门槛以及单次尝试预算均由冻结验收文件提供。[评测启动器](../day0_stage2/validator/aisbench_gsm8k.py) · [HTTP 观测器](../day0_stage2/validator/observe_gsm8k.py)
+
+### TP1 的共享专家与通信
+
+在指定 DP8 / EP8 / TP1 拓扑，前两轮服务都请求了 `enable_shared_expert_dp` 和 `enable_flashcomm1`。各 rank 的主干和草稿账本记录到相同的实际设置：共享专家在本地计算，`shared_expert_dp_enabled` 和 `sequence_parallel_enabled` 均为 false。路由专家在 EP8 上执行了跨卡交换。后续验收分别记录本地共享专家数值、EP 通信、以及这两个开关是否产生了对应的计算或通信。TP1 的序列并行通信项仍待满足。[对应框架设置](../vllm_ascend/ascend_config.py) · [逐层账本实现](../vllm_ascend/models/deepseek_v41/fused_moe.py)

@@ -35,3 +35,4 @@
 | 2026-11-10 | 确定性服务探针现可从普通 completions 接口读取真实 prompt 和输出 token ID，保存完整响应，并逐 token 对照使用相同输入的无投机服务。独立传输测试覆盖一致和分歧两种结果。 | [确定性解码检查](../day0_stage2/validator/check_deterministic_decode.py) |
 | 2026-11-10 | FULL 的 uniform decode 图现在通过核心 runner 的预热入口使用与捕获相同的索引长度。普通 profile 和短 prefill 继续按实际长度准备，预热异常也会恢复状态。指定镜像中六项 CPU 回归通过。 | [图准备与恢复](../vllm_ascend/models/deepseek_v41/graph_model.py) · [入口回归](../tests/ut/models/test_deepseek_v41_execution.py) |
 | 2026-11-10 | 已修复第二轮八卡捕获前的草稿元数据错误。DSpark 公布目标模型注册的注意力名，核心据此选择实际 verifier 缓存组及 kernel block size；草稿的三层历史仍由各自缓存管理。指定镜像回归覆盖非零组号、缺组和重复组。 | [草稿元数据](../vllm_ascend/models/deepseek_v41/spec_runner.py) · [回归](../tests/ut/models/test_deepseek_v41_spec_runner.py) |
+| 2026-11-10 | 前两轮组合的主干和草稿逐层账本均显示 TP1 下共享专家 DP 和序列并行未启用。已把两项的实际状态、共享专家本地数值、路由 EP 通信分别写入验收计划。 | [TP1 记录](PLAN.md#tp1-的共享专家与通信) |
