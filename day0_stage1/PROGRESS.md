@@ -53,3 +53,4 @@
 | 2026-11-10 | 修正路由权重的候选已完成正式 GSM8K。全套冻结题目各发送一次，HTTP 全部成功，实测并发达到冻结配置。每份原始回答与官方逐题标记、总评分均已核对归档。后续窗口布局改动使用独立的候选和结果目录。 | [评分与完整性核验](../day0_stage2/validator/summarize_gsm8k.py) |
 | 2026-11-10 | 分页注意力探针按每个请求的完整 prompt 建立参考，随后逐 token 执行，覆盖混批、拒绝回滚与页复用。修正参考后，指定镜像 CPU 的五种调度中有三种各出现一处 top-k 差异，三次固定形状回放中两次也出现数值差异，已保留逐层记录供定位。 | [可重放探针](../day0_stage2/validator/verify_paged_attention.py) |
 | 2026-11-10 | 修正窗口布局的源码 wheel 已完成八卡无投机对照。同一提示六次都生成相同的 18 个 token，覆盖 DP rank 0、4 及返回 top-logprobs 的请求。切换到组合服务时，一卡在模型加载前的空闲显存检查退出，未发送评测题，保存了该次启动记录。 | [同 rank 对照工具](../day0_stage2/validator/check_deterministic_decode.py) |
+| 2026-11-10 | 单卡加载第 0 层全部 384 个路由专家和本地共享专家。在三个真实位置改变批宽和后缀时，首行的 Q/KV、路由、两个 grouped matmul 的输入和输出等 16 个观测点逐位一致。固定 6 行的原生图更换后缀后重放也逐位一致。 | [原生量化执行](../vllm_ascend/models/deepseek_v41/weighted_experts.py) · [目标模型原生算子](../vllm_ascend/models/deepseek_v41/native_ops.py) |
