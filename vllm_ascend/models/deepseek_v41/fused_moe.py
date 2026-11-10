@@ -17,10 +17,11 @@ from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner, AscendRoutedExp
 from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
 from vllm_ascend.quantization.configs import AscendModelSlimConfig
 from vllm_ascend.quantization.method_adapters import AscendFusedMoEMethod, AscendLinearMethod
-from vllm_ascend.quantization.methods import AscendW4A8MXFPDSDynamicFusedMoEMethod, AscendW8A8MXFP8DynamicLinearMethod
+from vllm_ascend.quantization.methods import AscendW8A8MXFP8DynamicLinearMethod
 
 from .expert_weights import install_expert_weights, make_shared_expert
 from .native_ops import hash_route, initialize_native_ops, replace_native_leaves
+from .weighted_experts import V41FP4Experts, V41SharedActivation
 
 
 class PackedExpertConfig(AscendModelSlimConfig):
@@ -28,7 +29,7 @@ class PackedExpertConfig(AscendModelSlimConfig):
 
     def get_quant_method(self, layer, prefix, tid2eid=None):
         if hasattr(layer, "moe_config"):
-            return AscendFusedMoEMethod(AscendW4A8MXFPDSDynamicFusedMoEMethod(), layer.moe_config)
+            return AscendFusedMoEMethod(V41FP4Experts(), layer.moe_config)
         return AscendLinearMethod(AscendW8A8MXFP8DynamicLinearMethod())
 
 
@@ -103,6 +104,7 @@ class NativeMoE(nn.Module):
         config.quant_config = PackedExpertConfig({})
         with set_current_vllm_config(config), torch.device(self.gate.weight.device):
             shared = make_shared_expert(source.shared_experts, config.quant_config, prefix + ".shared_experts")
+            shared.act_fn = V41SharedActivation(first.swiglu_limit)
             self.runner = FusedMoEFactory(
                 num_experts=n,
                 top_k=self.gate.topk,
@@ -137,7 +139,7 @@ class NativeMoE(nn.Module):
                 "runner_base": AscendMoERunner.__qualname__,
                 "routed_experts": type(layer).__qualname__,
                 "quant_method": type(layer.quant_method).__qualname__,
-                "scheme": AscendW4A8MXFPDSDynamicFusedMoEMethod.__name__,
+                "scheme": type(layer.quant_method.quant_method).__name__,
                 "routed_experts_total": n,
                 "top_k": self.gate.topk,
                 "route_scale": self.gate.route_scale,
