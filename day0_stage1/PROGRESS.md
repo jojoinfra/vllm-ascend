@@ -32,3 +32,4 @@
 | 2026-11-10 | 计划书已补充阶段二完整服务、无投机对照与 AISBench 的启动和取证方式。八卡首轮已完成较短的 target/draft 预热前向，较长预热在专家切分处失败。 | [阶段二计划](PLAN.md#阶段二的服务与评测) |
 | 2026-11-10 | 八卡复现确认了首轮预热故障。主干与草稿曾共用按通信类型索引的分发器，后加载的草稿覆盖了专家数。现在每个 V4.1 runner 在调用实际 Ascend 算子时选用自己的通信配置。物理交换与原有 MX scale 维度通过八卡复验。 | [模型专用 runner](../vllm_ascend/models/deepseek_v41/fused_moe.py) · [八卡复现](../day0_stage2/validator/verify_moe_exchange.py) |
 | 2026-11-10 | 分发器增加正常调用和异常退出的嵌套回归，已在指定镜像的安装包上执行。第二轮八卡通过完整权重加载和长预热，进入首个 FULL decode capture；worker 初始化草稿注意力元数据时缺少 attn_layer_names，尚无 HTTP 或正式评测结果。 | [通信上下文回归](../tests/ut/models/test_deepseek_v41_moe_communication.py) · [草稿接线](../vllm_ascend/models/deepseek_v41/spec_runner.py) |
+| 2026-11-10 | 确定性服务探针现可从普通 completions 接口读取真实 prompt 和输出 token ID，保存完整响应，并逐 token 对照使用相同输入的无投机服务。独立传输测试覆盖一致和分歧两种结果。 | [确定性解码检查](../day0_stage2/validator/check_deterministic_decode.py) |
