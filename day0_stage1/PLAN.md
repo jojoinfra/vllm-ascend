@@ -1,6 +1,6 @@
 # DeepSeek V4.1 A5 仓内交付计划
 
-阶段一已用仓内 vllm-ascend 发行包完成八卡复验。当前执行阶段二的开发、上卡和评测。阶段二的模型及推理改动继续随同一仓安装，使用普通服务入口。每个独立改动提交并推送到开发分支，实际执行情况写入 [PROGRESS.md](PROGRESS.md)。
+阶段一已用仓内 vllm-ascend 发行包完成八卡复验。按任务方最新安排，已开始阶段三。阶段二正在运行的候选复测继续独立归档。各阶段的模型及权重加载器均随同一仓安装，使用普通服务入口。每个独立改动提交并推送到开发分支，实际执行情况写入 [PROGRESS.md](PROGRESS.md)。
 
 | 顺序 | 交付内容 | 检查方式 |
 | --- | --- | --- |
@@ -8,6 +8,7 @@
 | 2 | 从标准 `vllm serve <模型目录>` 启动。调用方提供普通硬件拓扑与 eager 配置，使用原始权重和 checkpoint tokenizer。 | 在指定镜像的新容器里运行八卡 DP8 / EP8 / TP1 / PP1，保存实际标准 CLI 和各 rank 的设备、专家、权重与 Engram 放置。 |
 | 3 | 在这份仓内发行包上复验阶段一。 | 核对 HCCL、独立 Engram 输出、模型列表、模板 IDs、四个 HTTP 请求、prefill 末位 logits 与连续 decode。按原先的数值检查规则记录第一处分歧。 |
 | 4 | 恢复阶段二，接入原生量化、融合路由与专家执行、decode 图回放、DSpark 提案验证及拒绝回滚。 | 在同一组合服务上复跑功能验证和已冻结的 AISBench GSM8K 验收，保存逐题结果与实际并发。 |
+| 5 | 执行阶段三，接入前缀缓存，验证绑核、单请求长上下文和 GPQA-Diamond。 | 记录命中与隔离、逐 rank 和线程 affinity、长文本使用量与检索输出、全集逐题评分。 |
 
 实现以冻结的官方 HF 模型语义、指定镜像以及基线 DSV4 注册接口为依据。其他分支已有的 DSV4.1 实现不在来源范围内。精确的环境、对照版本、权重哈希、样本和结果存放在私有验收记录中。[重放说明](patch/REPLAY.md)
 
@@ -45,3 +46,16 @@ vllm serve "$MODEL_DIR" --served-model-name "$SERVED_MODEL" \
 ```
 
 示例中的两个并行开关保留已测命令行原值，在 TP1 下的生效状态见上节。阶段一 eager 配置和安装重放步骤见[阶段一说明](patch/REPLAY.md)。
+
+## 阶段三的服务与验收
+
+继续用指定 A5 镜像、原始 checkpoint、仓内 wheel 和普通 `vllm serve`。DP8/EP8、TP1、PP1、PCP1，使用阶段二的 native experts、eager prefill、DSpark 和真实 decode 图回放。在同一份候选上记录各项生效配置、输入及结果。
+
+| 项目 | 实测与判定 |
+| --- | --- |
+| 前缀缓存 | 开关分别冷启动，固定同一 DP rank，测冷请求、同前缀不同后缀的命中、改变一个前缀块的 miss，以及请求交错和页复用。核对实际 cached tokens、输出 token、Engram 历史、压缩索引状态和 DSpark 接受或回滚。 |
+| CPU 绑核 | 分别传入 `enable_cpu_binding=false/true`。记录镜像默认值、NPU 对应 NUMA 节点，以及每个 worker 主线程、ACL 和释放线程的实际 CPU affinity。 |
+| 单请求 1M | 最终组合设置 `--max-model-len 1048576`。逐档发出已知首、中、尾检索提示，边界按实际 1,048,560 个输入及 16 个输出核对，同时记录每 rank 的 KV 与 HBM 峰值，并发送超限请求。容量归属实际承载该请求的 rank。 |
+| GPQA-Diamond | 用 AISBench 单次遍历全部 198 道唯一题。冻结题单、选项顺序、模板、生成参数及官方抽取器，保留逐题预测、原始 HTTP 与评分。报告完整度和正确率，分数无最低门槛。 |
+
+本阶段保持 DSA context parallel 关闭，`shared_expert_dp_enabled` 和 `sequence_parallel_enabled` 继续只记录实际状态。阶段二已有的数值差异保留在对应候选的结果中。逐项原始证据归档后更新[进展](PROGRESS.md)。

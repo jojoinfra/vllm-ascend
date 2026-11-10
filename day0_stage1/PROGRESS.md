@@ -1,6 +1,6 @@
 # DeepSeek V4.1 A5 进展
 
-仓内发行包的阶段一八卡复验已完成。阶段二沿用本包和普通服务入口。[执行顺序](PLAN.md) · [标准入口与重放命令](patch/REPLAY.md)
+仓内发行包的阶段一八卡复验已完成。阶段二、三沿用本包和普通服务入口。[执行顺序](PLAN.md) · [标准入口与重放命令](patch/REPLAY.md)
 
 | 日期 | 进展 | 对应材料 |
 | --- | --- | --- |
@@ -54,3 +54,4 @@
 | 2026-11-10 | 分页注意力探针按每个请求的完整 prompt 建立参考，随后逐 token 执行，覆盖混批、拒绝回滚与页复用。修正参考后，指定镜像 CPU 的五种调度中有三种各出现一处 top-k 差异，三次固定形状回放中两次也出现数值差异，已保留逐层记录供定位。 | [可重放探针](../day0_stage2/validator/verify_paged_attention.py) |
 | 2026-11-10 | 修正窗口布局的源码 wheel 已完成八卡无投机对照。同一提示六次都生成相同的 18 个 token，覆盖 DP rank 0、4 及返回 top-logprobs 的请求。切换到组合服务时，一卡在模型加载前的空闲显存检查退出，未发送评测题，保存了该次启动记录。 | [同 rank 对照工具](../day0_stage2/validator/check_deterministic_decode.py) |
 | 2026-11-10 | 单卡加载第 0 层全部 384 个路由专家和本地共享专家。在三个真实位置改变批宽和后缀时，首行的 Q/KV、路由、两个 grouped matmul 的输入和输出等 16 个观测点逐位一致。固定 6 行的原生图更换后缀后重放也逐位一致。 | [原生量化执行](../vllm_ascend/models/deepseek_v41/weighted_experts.py) · [目标模型原生算子](../vllm_ascend/models/deepseek_v41/native_ops.py) |
+| 2026-11-10 | 已按任务方指示启动阶段三。计划已登记缓存开关与请求隔离、绑核开关与逐线程 affinity、1M 单请求边界及 GPQA-Diamond 全集。阶段二新 wheel 的 34 项仓内 CPU UT、八卡四问和并发 32 已完成；同 rank 投机对照仍有 token 差异，新一轮正式评分独立归档。 | [阶段三计划](PLAN.md#阶段三的服务与验收) · [对照工具](../day0_stage2/validator/check_deterministic_decode.py) |
