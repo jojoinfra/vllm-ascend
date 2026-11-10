@@ -56,3 +56,4 @@
 | 2026-11-10 | 单卡加载第 0 层全部 384 个路由专家和本地共享专家。在三个真实位置改变批宽和后缀时，首行的 Q/KV、路由、两个 grouped matmul 的输入和输出等 16 个观测点逐位一致。固定 6 行的原生图更换后缀后重放也逐位一致。 | [原生量化执行](../vllm_ascend/models/deepseek_v41/weighted_experts.py) · [目标模型原生算子](../vllm_ascend/models/deepseek_v41/native_ops.py) |
 | 2026-11-10 | 已按任务方指示启动阶段三。计划已登记缓存开关与请求隔离、绑核开关与逐线程 affinity、1M 单请求边界及 GPQA-Diamond 全集。阶段二新 wheel 的 34 项仓内 CPU UT、八卡四问和并发 32 已完成；同 rank 投机对照仍有 token 差异，新一轮正式评分独立归档。 | [阶段三计划](PLAN.md#阶段三的服务与验收) · [对照工具](../day0_stage2/validator/check_deterministic_decode.py) |
 | 2026-11-10 | 阶段三验收输入协议和判据已冻结。在当前八卡服务上直接读取 Linux 线程掩码，八个 worker 的主线程、ACL 和释放线程共 24 个均位于各自 NPU 的本地 NUMA CPU 范围。显式关闭和开启绑核的对照会在阶段三候选上执行。 | [逐线程检查](../day0_stage3/validator/check_affinity.py) |
+| 2026-11-10 | 已在指定镜像用 checkpoint tokenizer 和仓内聊天模板生成 1M 界内、超界及中间档的精确输入。每份清单记录输入哈希和首中尾三枚检索标记的位置。实机检查会同时核对服务 tokenization、usage、实际回答和超限 HTTP 状态。 | [长请求检查](../day0_stage3/validator/context_probe.py) |
