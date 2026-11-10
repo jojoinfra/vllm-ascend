@@ -10,3 +10,4 @@
 | 2026-11-10 | 整仓 wheel 正在指定 A5 镜像中构建。新容器的普通 vllm serve 和八卡复验结果待归档。 | [重放步骤](patch/REPLAY.md) |
 | 2026-11-10 | 新容器已安装包含仓内 Python 源码及指定镜像原有 A5 二进制的单一 wheel，并检查原生文件哈希。普通 `vllm serve` 已开始冷启动，取证开关关闭。标准源码构建仍在运行。 | [注册入口](../vllm_ascend/__init__.py) |
 | 2026-11-10 | 初次仓内普通 CLI 已自动识别 V4.1 并选择仓内专用加载器，所有 rank 完成权重加载。服务就绪前，HCCL 首次集合通信报设备内核初始化错误；本轮未进入 HTTP 检查，正在独立复验通信。 | [普通 CLI](patch/infra/serve.sh) · [HCCL 探针](patch/infra/hccl_probe.py) |
+| 2026-11-10 | 设备日志定位到 AICPU 缺失符号 `RunAicpuIndOpCommInit`。仅在进程内选用 HCCL AIV 后，八卡集合通信完成，普通 CLI 自动加载随包模板并完成四个真实 HTTP 请求，依次返回 ok、4、7、ok。已保存默认通信模式的失败记录。 | [复验说明](patch/REPLAY.md) · [服务检查器](validator/) |

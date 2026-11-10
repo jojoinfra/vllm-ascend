@@ -34,6 +34,8 @@ The launch config covers one 256-token sequence per DP rank, a single API fronte
      --oracle results/hf-engram-cpu.npz --output 'results/engram-npu/rank-{rank}.json'
    ```
 
+On the tested A5 host, the default HCCL communication engine failed to resolve `RunAicpuIndOpCommInit` on two devices. The eight-rank probe and the following service runs succeeded with `export HCCL_OP_EXPANSION_MODE=AIV` in the launch environment. This is a host-specific replay setting.
+
 For an interactive eager service, use the ordinary vLLM entry point, as shown in `patch/infra/serve.sh`. The example sets standard topology, scheduler and evaluation options. The independent reference directory and diagnostic switches are used only by the evidence checks.
 
 4. In the container export `PORT` with the reserved value and `RUN_NAME` with a new attempt name. Run the launcher, then compare the numerical request on the serving rank against the independent trace:
