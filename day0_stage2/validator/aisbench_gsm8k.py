@@ -2,6 +2,7 @@
 """Replay a frozen AISBench GSM8K configuration against an OpenAI-compatible service."""
 
 import argparse
+import asyncio
 import hashlib
 import json
 import shutil
@@ -98,10 +99,15 @@ def main():
     )
     with (output / "launch.json").open("x") as file:
         json.dump(receipt, file, indent=2)
-    with (output / "client.log").open("x") as log:
-        result = subprocess.run(argv, cwd=source, stdout=log, stderr=subprocess.STDOUT, check=False)
-    (output / "exit.json").write_text(json.dumps({"exit_code": result.returncode}) + "\n")
-    raise SystemExit(result.returncode)
+    if args.dry_run:
+        with (output / "client.log").open("x") as log:
+            status = subprocess.run(argv, cwd=source, stdout=log, stderr=subprocess.STDOUT, check=False).returncode
+    else:
+        from observe_gsm8k import run_observed
+
+        status = asyncio.run(run_observed(argv, source, output, args.endpoint.rstrip("/"), set(ids)))
+    (output / "exit.json").write_text(json.dumps({"exit_code": status}) + "\n")
+    raise SystemExit(status)
 
 
 if __name__ == "__main__":
