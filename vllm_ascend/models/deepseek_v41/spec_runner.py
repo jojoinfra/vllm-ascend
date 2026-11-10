@@ -101,6 +101,11 @@ def _make_proposer_type(native_base):
             self.ready = False
             self.blocks_completed = 0
             self.kv_cache_gid = 0
+            # Ascend uses the first name to choose the *target* verifier query
+            # metadata. Core indexes only draft-owned KV layers in its private set.
+            self.attn_layer_names = []
+            self._draft_attn_layer_names = set()
+            self.draft_attn_groups = []
 
         def load_model(self, model):
             from vllm.distributed.parallel_state import get_ep_group
@@ -112,9 +117,9 @@ def _make_proposer_type(native_base):
             config = self.vllm_config
             if getattr(config.scheduler_config, "async_scheduling", False):
                 raise ValueError("V4.1 DSpark currently requires synchronous speculative scheduling")
-            target = getattr(model, "backbone", None)
-            if target is None:
-                target = self.v41_runner.get_model().backbone
+            target_model = model if hasattr(model, "backbone") else self.v41_runner.get_model()
+            target = target_model.backbone
+            self.attn_layer_names = [target_model.metadata_key]
             if not hasattr(target, "embed") or not hasattr(target, "head"):
                 raise TypeError("expected target backbone with tied embedding and full LM head")
             ep = get_ep_group()
@@ -140,11 +145,25 @@ def _make_proposer_type(native_base):
             self.model.eval()
             self.ready = True
 
+        def validate_same_kv_cache_group(self, kv_cache_config):
+            if len(self.attn_layer_names) != 1:
+                raise ValueError("The V4.1 target must publish its scheduler attention layer")
+            matches = [
+                i
+                for i, group in enumerate(kv_cache_config.kv_cache_groups)
+                if self.attn_layer_names[0] in group.layer_names
+            ]
+            if len(matches) != 1:
+                raise ValueError("The V4.1 verifier attention layer must belong to exactly one KV cache group")
+            self.kv_cache_gid = matches[0]
+
         def initialize_attn_backend(self, kv_cache_config, kernel_block_sizes=None):
-            # Capture and backend initialization query the target's only real scheduler
-            # cache group. DSpark's projected target-hidden history is owned by DSparkDraft.
-            self.kv_cache_gid = 0
-            self.block_size = self.vllm_config.cache_config.block_size
+            self.validate_same_kv_cache_group(kv_cache_config)
+            gid = self.kv_cache_gid
+            if kernel_block_sizes is not None and gid < len(kernel_block_sizes):
+                self.block_size = kernel_block_sizes[gid]
+            else:
+                self.block_size = kv_cache_config.kv_cache_groups[gid].kv_cache_spec.block_size
 
         def set_per_group_attn_metadata(self, gid, block_table, slot_mapping):
             # Our draft addresses independent, absolute-position state; no scheduler

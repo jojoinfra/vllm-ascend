@@ -174,3 +174,31 @@ def test_parked_request_restores_committed_prefix_across_eviction_and_rewind():
     assert state.last["old"] == 2
     state.assign(["old"], live_requests={"old"}, model=draft)
     assert not state.suspended and "new" not in state.last
+
+
+def test_draft_exposes_target_group_metadata_without_claiming_scheduler_kv():
+    from vllm_ascend.models.deepseek_v41.spec_runner import _make_proposer_type
+
+    class NativeBase:
+        def __init__(self, config, device, runner):
+            self.vllm_config = config
+
+    def group(name, block_size):
+        return SimpleNamespace(layer_names=[name], kv_cache_spec=SimpleNamespace(block_size=block_size))
+
+    cfg = SimpleNamespace(scheduler_config=SimpleNamespace(max_num_seqs=4))
+    proposer = _make_proposer_type(NativeBase)(cfg, "cpu", None)
+    target_key = "model.layers.0.self_attn.attn"
+    proposer.attn_layer_names = [target_key]
+    target_group = group(target_key, 128)
+    groups = SimpleNamespace(kv_cache_groups=[group("other.attn", 64), target_group])
+    proposer.initialize_attn_backend(groups, [32, 16])
+    assert proposer.kv_cache_gid == 1 and proposer.block_size == 16
+    assert proposer.attn_layer_names[0] in target_group.layer_names
+    assert proposer.draft_attn_groups == [] and proposer._draft_attn_layer_names == set()
+    proposer.initialize_attn_backend(groups)
+    assert proposer.block_size == 128
+    with pytest.raises(ValueError, match="exactly one"):
+        proposer.validate_same_kv_cache_group(SimpleNamespace(kv_cache_groups=[target_group, target_group]))
+    with pytest.raises(ValueError, match="exactly one"):
+        proposer.initialize_attn_backend(SimpleNamespace(kv_cache_groups=[group("other", 32)]))
