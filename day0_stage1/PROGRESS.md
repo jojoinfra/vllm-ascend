@@ -46,3 +46,4 @@
 | 2026-11-10 | 正式评分汇总现在按原题序逐项关联线上请求、回复与官方 AISBench 的逐题布尔得分，并复算总分。全部记录的完整性、并发和单次尝试先行校验；中断轮没有生成分数。已通过完整、缺项、重复与矛盾记录等回归。 | [逐题核验](../day0_stage2/validator/summarize_gsm8k.py) |
 | 2026-11-10 | 计划书已加入八卡普通 `vllm serve` 的实测命令，标出 TP1 的观测开关与正式评测的零预热设置。 | [启动命令](PLAN.md#普通服务入口) |
 | 2026-11-10 | 独立的确定性诊断请求可从服务取出每个位置的候选 token ID 和 log probability，供带投机与无投机首次分歧定位。正式 GSM8K 继续使用原请求参数。 | [逐 token 探针](../day0_stage2/validator/check_deterministic_decode.py) |
+| 2026-11-10 | 确定性探针支持使用 vLLM 的 DP rank 请求头，让带投机和无投机的两次请求落到同一张卡。比对前同时核对输入、生成参数与选择的 rank。 | [固定 rank 对照](../day0_stage2/validator/check_deterministic_decode.py) |

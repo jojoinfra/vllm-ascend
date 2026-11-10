@@ -18,10 +18,15 @@ def run(args):
         if args.logprobs < 1:
             raise ValueError("Expected a positive number of ranked tokens")
         body.update(logprobs=args.logprobs, return_tokens_as_token_ids=True)
+    headers = {"Content-Type": "application/json"}
+    if args.data_parallel_rank is not None:
+        if args.data_parallel_rank < 0:
+            raise ValueError("Expected a nonnegative data-parallel rank")
+        headers["X-data-parallel-rank"] = str(args.data_parallel_rank)
     req = Request(
         args.base_url.rstrip("/") + "/completions",
         data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
     )
     with args.output.open("x", encoding="utf-8") as output:
         with urlopen(req, timeout=args.timeout) as response:
@@ -45,9 +50,14 @@ def run(args):
         record = dict(
             request=body, http_status=status, response=result, valid=valid, reference_ids_match=tokens == reference
         )
+        record["data_parallel_rank"] = args.data_parallel_rank
         if args.control:
             control = json.loads(args.control.read_bytes())
-            if not control["valid"] or control["request"] != body:
+            if (
+                not control["valid"]
+                or control["request"] != body
+                or control.get("data_parallel_rank") != args.data_parallel_rank
+            ):
                 raise ValueError("Incompatible control request or response")
             record["control_ids_match"] = tokens == control["response"]["choices"][0]["token_ids"]
         json.dump(record, output, ensure_ascii=False, indent=2)
@@ -68,6 +78,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--logprobs", type=int, help="Request ranked token IDs and their log probabilities at each position"
     )
+    parser.add_argument("--data-parallel-rank", type=int, help="Send the request to the same DP rank in both services")
     parser.add_argument("--timeout", type=float, default=600)
     parser.add_argument("--output", type=Path, required=True)
     raise SystemExit(0 if run(parser.parse_args()) else 1)
