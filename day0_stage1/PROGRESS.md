@@ -29,3 +29,4 @@
 | 2026-11-10 | DSpark 现在保留本步未排到的请求。槽位需要让给其他请求时保存已提交草稿 KV，恢复调度时按原请求还原，可继续验证或回绕。 | [请求状态与回归](../tests/ut/models/test_deepseek_v41_spec_runner.py) |
 | 2026-11-10 | 专家字节布局回归已统一从发行包导入，覆盖跨 rank 范围、W1/W3 顺序、E2M1 原码与 UE8M0 边界。 | [权重回归](../tests/ut/models/test_deepseek_v41_expert_weights.py) |
 | 2026-11-10 | 阶段二并发 HTTP 检查器复用阶段一冻结的问答检查，同时发起独立对话，核验不同请求 ID 与实际重叠。传输自测通过。 | [并发检查器](../day0_stage2/validator/check_concurrent_chat.py) |
+| 2026-11-10 | 计划书已补充阶段二完整服务、无投机对照与 AISBench 的启动和取证方式。八卡首轮已完成较短的 target/draft 预热前向，较长预热在专家切分处失败。 | [阶段二计划](PLAN.md#阶段二的服务与评测) |
