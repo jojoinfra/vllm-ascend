@@ -34,12 +34,12 @@ def _fp4_level(x):
     code = ((value > .25).int() + (value >= .75).int() + (value > 1.25).int()
             + (value >= 1.75).int() + (value > 2.5).int()
             + (value >= 3.5).int() + (value > 5.).int())
-    return code | ((x < 0).int() << 3)
+    return code | (torch.signbit(x).int() << 3)
 
 
 def _fp4_values(codes):
     lut = torch.tensor([0., .5, 1., 1.5, 2., 3., 4., 6.,
-                        -0., -.5, -1., -1.5, -2., -3., -4., -6.], device=codes.device)
+                        -0., -.5, -1., -1.5, -2., -3., -4., -6.], dtype=torch.float32, device=codes.device)
     return lut[codes.long()]
 
 
