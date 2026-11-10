@@ -25,3 +25,4 @@
 | 2026-11-10 | 修正了同一批次中长短请求的 DSpark 上下文判断。接近长度上限的请求停止提案，其余请求继续；同一轮活跃或空闲的 DP worker 都只进入一次草稿计算。 | [调度回归](../tests/ut/models/test_deepseek_v41_spec_runner.py) |
 | 2026-11-10 | 评测客户端已增加 HTTP 边界观测，记录每个题目 ID 的实际请求次数、完成状态、原始生成和同时在途数。用两条合成请求核验了转发及重叠测量，尚未开始正式 GSM8K。 | [HTTP 观测](../day0_stage2/validator/observe_gsm8k.py) |
 | 2026-11-10 | 首次八卡阶段二候选已从普通 CLI 加载目标模型、独立的 DSpark 权重和所有 rank 的原生 MoE runner。启动 forward 中，ALL2ALLV 的 MX scale 张量与按 token 切分的通信尺寸不符，服务未进入 HTTP；已保留该轮及权重账本。 | [EP 分发](../vllm_ascend/ops/fused_moe/token_dispatcher.py) |
+| 2026-11-10 | A5 单卡验证了动态 FP8 激活的 scale 算法。在含零值与量化边界的合成 BF16 块上，scale_alg=1 的所有 E4M3 码与所有非零组 scale 对齐 HF 参考，已按 V4.1 文本类型接入现有硬件能力选择。 | [量化选择](../vllm_ascend/quantization/utils.py) · [回归用例](../tests/ut/quantization/test_utils.py) |
