@@ -18,3 +18,4 @@
 | 2026-11-10 | 评测客户端已按冻结的 AISBench 配置完成 dry-run。检查了官方题目顺序、评分器源码和最终解析的 reader 范围、总并发、输出上限与单次尝试。正式评测等待组合服务。 | [评测启动器](../day0_stage2/validator/aisbench_gsm8k.py) |
 | 2026-11-10 | 从仓内模型注册回调接入 DSpark 配置。指定镜像的真实 EngineArgs 为 V4.1 识别训练得到的草稿架构、目标层、噪声 token 和完整提案长度。 | [推理配置](../vllm_ascend/models/deepseek_v41/spec_config.py) |
 | 2026-11-10 | 按实际物理页接入滑窗、压缩 KV、两级 indexer 和跨层共享。在单卡缩维六层用例上，真实 ACL 图捕获后三次重放均与逐请求 eager 输出一致。CPU 端另记录了填充宽度影响并列 top-k 的案例。 | [分页注意力](../vllm_ascend/models/deepseek_v41/graph_ops.py) · [硬件探针](../day0_stage2/validator/verify_paged_attention.py) |
+| 2026-11-10 | 接入 AscendMoERunner 与原始 FP4 路由专家、FP8 共享专家。真实 A5 探针观察到路由、分组矩阵、重排及共享计算，捕获后的图在不同输入上完成回放。融合输出相对逐专家参考仍有差异。 | [融合执行](../vllm_ascend/models/deepseek_v41/fused_moe.py) · [专家权重](../vllm_ascend/models/deepseek_v41/expert_weights.py) |
