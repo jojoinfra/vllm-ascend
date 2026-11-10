@@ -22,3 +22,4 @@
 | 2026-11-10 | 普通服务入口按调度配置选择单序列 eager 或分页模型。分页模型在权重加载后安装原生专家，并在指定镜像的 ACLGraphWrapper 完成真实 capture/replay 时更新 Engram 输入。 | [模型选择](../vllm_ascend/models/deepseek_v41/model.py) · [图执行](../vllm_ascend/models/deepseek_v41/graph_model.py) · [入口用例](../tests/ut/models/test_deepseek_v41_execution.py) |
 | 2026-11-10 | V4.1 worker 已接入 DSpark 提案和目标模型拒绝采样，按请求提交被接受的目标行。单卡实测含真实接受、拒绝和污染无效行的检查。八卡组合仍待实测。 | [Worker 适配](../vllm_ascend/models/deepseek_v41/spec_runner.py) · [请求边界回归](../tests/ut/models/test_deepseek_v41_spec_runner.py) |
 | 2026-11-10 | 同一阶段一实现的完整 A5 原生源码 wheel 已用普通 pip wheel 构建。安装后再次独立冷启动普通服务与取证服务，并重跑八卡 Engram。两次 HTTP 结果与此前一致，八份逐层张量文件逐字节相同。 | [仓内重放步骤](patch/REPLAY.md) · [数值探针](validator/compare_traces.py) |
+| 2026-11-10 | 修正了同一批次中长短请求的 DSpark 上下文判断。接近长度上限的请求停止提案，其余请求继续；同一轮活跃或空闲的 DP worker 都只进入一次草稿计算。 | [调度回归](../tests/ut/models/test_deepseek_v41_spec_runner.py) |

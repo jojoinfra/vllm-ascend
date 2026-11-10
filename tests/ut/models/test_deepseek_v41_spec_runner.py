@@ -91,3 +91,59 @@ def test_worker_keeps_only_verified_rows_when_two_requests_are_reordered():
     ) == [[2, 3], [8, 9]]
     assert proposer.model.last_commit == [(1, 2, 8.0), (1, 3, 9.0), (1, 4, 10.0), (0, 2, 11.0), (0, 3, 12.0)]
     assert proposer.ledger.last == {"a": 3, "b": 4}
+
+
+def test_context_fit_is_per_request_and_each_fallback_enters_draft_once(monkeypatch):
+    import sys
+    from types import ModuleType
+
+    from vllm_ascend.models.deepseek_v41 import spec_runner
+
+    class NativeRunner:
+        def _input_fits_in_drafter(self, metadata):
+            return False
+
+        def sample_tokens(self, native_already_drafted):
+            if native_already_drafted:
+                self.drafter.dummy_run()
+
+        _dummy_run = sample_tokens
+
+        def _get_drafter(self):
+            return None
+
+        propose_draft_token_ids = _eagle3_uses_aux_hidden_state = _get_drafter
+
+    class Draft:
+        ready = True
+        blocks_completed = 0
+
+        def dummy_run(self):
+            self.blocks_completed += 1
+
+    packages = {
+        name: ModuleType(name)
+        for name in (
+            "vllm_ascend.ops",
+            "vllm_ascend.spec_decode",
+            "vllm_ascend.worker",
+            "vllm_ascend.worker.model_runner_v1",
+        )
+    }
+    packages["vllm_ascend.spec_decode"].AscendDSparkProposer = object
+    packages["vllm_ascend.worker.model_runner_v1"].NPUModelRunner = NativeRunner
+    for key, module in packages.items():
+        monkeypatch.setitem(sys.modules, key, module)
+    monkeypatch.setattr(spec_runner, "_make_proposer_type", lambda base: Draft)
+    spec_runner.install_spec_runner()
+    runner = NativeRunner()
+    runner.drafter = Draft()
+    assert runner._input_fits_in_drafter(object())
+    assert not runner._input_fits_in_drafter(None)
+    for step in [runner.sample_tokens, runner._dummy_run]:
+        for native_already_drafted in (True, False):
+            before = runner.drafter.blocks_completed
+            step(native_already_drafted)
+            assert runner.drafter.blocks_completed == before + 1
+    runner.drafter = object()
+    assert not runner._input_fits_in_drafter(object())

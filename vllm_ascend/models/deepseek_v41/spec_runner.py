@@ -147,7 +147,7 @@ def _make_proposer_type(native_base):
             if self.receipt:
                 with self.receipt.open("a") as stream:
                     print(
-                        json.dumps(dict(step=self.blocks_completed, role=role, tokens_per_dp_rank=width)),
+                        json.dumps({"step": self.blocks_completed, "role": role, "tokens_per_dp_rank": width}),
                         file=stream,
                     )
             return result
@@ -201,18 +201,18 @@ def _make_proposer_type(native_base):
                     seeds[row], slots[row], last[row] = valid[row][-1], index, end
                 if self.receipt:
                     events.append(
-                        dict(
-                            row=row,
-                            req_id=req,
-                            start=query[0],
-                            scheduled=count,
-                            proposed=draft,
-                            accepted=accepted,
-                            rejected=len(draft) - accepted,
-                            committed_input_count=retained,
-                            last_committed=end,
-                            emitted=valid[row],
-                        )
+                        {
+                            "row": row,
+                            "req_id": req,
+                            "start": query[0],
+                            "scheduled": count,
+                            "proposed": draft,
+                            "accepted": accepted,
+                            "rejected": len(draft) - accepted,
+                            "committed_input_count": retained,
+                            "last_committed": end,
+                            "emitted": valid[row],
+                        }
                     )
                 start += count
             if commits:
