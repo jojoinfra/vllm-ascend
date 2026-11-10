@@ -17,3 +17,4 @@
 | 2026-11-10 | 三层 DSpark 草稿、顺序 Markov head 和 confidence head 已加载原始权重，复用了目标 embedding 和输出 head。单卡用冻结的目标层输出验证了完整五位提案，原生量化下提案 token 均与 HF CPU 对照一致，confidence 数值仍有差异。 | [草稿模型](../vllm_ascend/models/deepseek_v41/dspark.py) · [对照探针](../day0_stage2/validator/verify_dspark.py) |
 | 2026-11-10 | 评测客户端已按冻结的 AISBench 配置完成 dry-run。检查了官方题目顺序、评分器源码和最终解析的 reader 范围、总并发、输出上限与单次尝试。正式评测等待组合服务。 | [评测启动器](../day0_stage2/validator/aisbench_gsm8k.py) |
 | 2026-11-10 | 从仓内模型注册回调接入 DSpark 配置。指定镜像的真实 EngineArgs 为 V4.1 识别训练得到的草稿架构、目标层、噪声 token 和完整提案长度。 | [推理配置](../vllm_ascend/models/deepseek_v41/spec_config.py) |
+| 2026-11-10 | 按实际物理页接入滑窗、压缩 KV、两级 indexer 和跨层共享。在单卡缩维六层用例上，真实 ACL 图捕获后三次重放均与逐请求 eager 输出一致。CPU 端另记录了填充宽度影响并列 top-k 的案例。 | [分页注意力](../vllm_ascend/models/deepseek_v41/graph_ops.py) · [硬件探针](../day0_stage2/validator/verify_paged_attention.py) |
