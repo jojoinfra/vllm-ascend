@@ -14,6 +14,10 @@ def run(args):
     if not prompt or not reference:
         raise ValueError("Expected nonempty diagnostic prompt and reference generation")
     body = dict(model=args.model, prompt=prompt, temperature=0, max_tokens=len(reference), return_token_ids=True)
+    if args.logprobs is not None:
+        if args.logprobs < 1:
+            raise ValueError("Expected a positive number of ranked tokens")
+        body.update(logprobs=args.logprobs, return_tokens_as_token_ids=True)
     req = Request(
         args.base_url.rstrip("/") + "/completions",
         data=json.dumps(body).encode(),
@@ -35,6 +39,9 @@ def run(args):
             and result["usage"]["completion_tokens"] == len(tokens)
             and choice["finish_reason"] in {"stop", "length"}
         )
+        if args.logprobs is not None:
+            rankings = (choice.get("logprobs") or {}).get("top_logprobs")
+            valid = valid and isinstance(rankings, list) and len(rankings) == len(tokens) and all(rankings)
         record = dict(
             request=body, http_status=status, response=result, valid=valid, reference_ids_match=tokens == reference
         )
@@ -57,6 +64,9 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--control", type=Path, help="Receipt from the same revision with a different speculation setting"
+    )
+    parser.add_argument(
+        "--logprobs", type=int, help="Request ranked token IDs and their log probabilities at each position"
     )
     parser.add_argument("--timeout", type=float, default=600)
     parser.add_argument("--output", type=Path, required=True)
