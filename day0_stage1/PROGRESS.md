@@ -48,3 +48,4 @@
 | 2026-11-10 | 独立的确定性诊断请求可从服务取出每个位置的候选 token ID 和 log probability，供带投机与无投机首次分歧定位。正式 GSM8K 继续使用原请求参数。 | [逐 token 探针](../day0_stage2/validator/check_deterministic_decode.py) |
 | 2026-11-10 | 确定性探针支持使用 vLLM 的 DP rank 请求头，让带投机和无投机的两次请求落到同一张卡。比对前同时核对输入、生成参数与选择的 rank。 | [固定 rank 对照](../day0_stage2/validator/check_deterministic_decode.py) |
 | 2026-11-10 | 在指定镜像的独立 CPU 容器安装带自动页池的源码 wheel，按仓库的 UT 初始化运行全部 V4.1 模型单测，32 项通过。另用真实权重和拒绝轨迹检查分页注意力，对固定前缀改变候选后缀时，五个代表层的已提交输出和缓存均一致。 | [模型 UT](../tests/ut/models/) · [分页注意力](../vllm_ascend/models/deepseek_v41/graph_ops.py) |
+| 2026-11-10 | 零预热正式评测已越过半程，客户端实测峰值并发 32。已回传的请求均为 HTTP 200，已发出的题目均只有一次请求。官方逐题评分在推理结束后核对。 | [HTTP 核验](../day0_stage2/validator/observe_gsm8k.py) · [官方评分核验](../day0_stage2/validator/summarize_gsm8k.py) |
