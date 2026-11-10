@@ -494,6 +494,13 @@ class NPUWorker(WorkerBase):
 
             self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
         else:
+            if self.vllm_config.speculative_config is not None:
+                from vllm_ascend.models.deepseek_v41.spec_config import is_v41_spec
+
+                if is_v41_spec(self.vllm_config.speculative_config):
+                    from vllm_ascend.models.deepseek_v41.spec_runner import install_spec_runner
+
+                    install_spec_runner()
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
 
         if self.rank == 0:
