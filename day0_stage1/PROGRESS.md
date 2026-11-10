@@ -30,3 +30,4 @@
 | 2026-11-10 | 专家字节布局回归已统一从发行包导入，覆盖跨 rank 范围、W1/W3 顺序、E2M1 原码与 UE8M0 边界。 | [权重回归](../tests/ut/models/test_deepseek_v41_expert_weights.py) |
 | 2026-11-10 | 阶段二并发 HTTP 检查器复用阶段一冻结的问答检查，同时发起独立对话，核验不同请求 ID 与实际重叠。传输自测通过。 | [并发检查器](../day0_stage2/validator/check_concurrent_chat.py) |
 | 2026-11-10 | 计划书已补充阶段二完整服务、无投机对照与 AISBench 的启动和取证方式。八卡首轮已完成较短的 target/draft 预热前向，较长预热在专家切分处失败。 | [阶段二计划](PLAN.md#阶段二的服务与评测) |
+| 2026-11-10 | 八卡复现确认了首轮预热故障。主干与草稿曾共用按通信类型索引的分发器，后加载的草稿覆盖了专家数。现在每个 V4.1 runner 在调用实际 Ascend 算子时选用自己的通信配置。物理交换与原有 MX scale 维度通过八卡复验。 | [模型专用 runner](../vllm_ascend/models/deepseek_v41/fused_moe.py) · [八卡复现](../day0_stage2/validator/verify_moe_exchange.py) |

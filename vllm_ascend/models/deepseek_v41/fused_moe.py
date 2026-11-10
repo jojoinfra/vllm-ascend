@@ -12,6 +12,9 @@ from vllm.config import get_current_vllm_config, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMoERouter
 
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner, AscendRoutedExperts
+from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
 from vllm_ascend.quantization.configs import AscendModelSlimConfig
 from vllm_ascend.quantization.method_adapters import AscendFusedMoEMethod, AscendLinearMethod
 from vllm_ascend.quantization.methods import AscendW4A8MXFPDSDynamicFusedMoEMethod, AscendW8A8MXFP8DynamicLinearMethod
@@ -60,6 +63,27 @@ class TextRouter(FusedMoERouter):
         return self._select_experts(hidden_states, gating_output)
 
 
+class V41MoERunner(AscendMoERunner):
+    """Keep the stock runner's communication objects aligned with this expert layout."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # The platform constructs dispatchers for this MoE in the base initializer.
+        # Another model in the same worker can subsequently register a different
+        # expert count and top-k under the same communication type.
+        self.comm_methods = {kind: method for kind in MoECommType if (method := get_moe_comm_method(kind)) is not None}
+
+    def _forward_impl(self, *args, **kwargs):
+        # This runs inside the native vLLM MoE custom op, outside the compiled
+        # model's Python graph. Keep the platform's actual selected collective.
+        previous = _EXTRA_CTX.moe_comm_method
+        _EXTRA_CTX.moe_comm_method = self.comm_methods[_EXTRA_CTX.moe_comm_type]
+        try:
+            return super()._forward_impl(*args, **kwargs)
+        finally:
+            _EXTRA_CTX.moe_comm_method = previous
+
+
 class NativeMoE(nn.Module):
     def __init__(self, source, prefix):
         super().__init__()
@@ -67,8 +91,6 @@ class NativeMoE(nn.Module):
         # The platform installs its factory override at runtime. Import after
         # registration to obtain the same public factory as other vLLM models.
         from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory
-
-        from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner, AscendRoutedExperts
 
         self.gate = source.gate
         if self.gate.score_func != "sqrtsoftplus" or not self.gate.norm_topk_prob:
@@ -89,7 +111,7 @@ class NativeMoE(nn.Module):
                 params_dtype=torch.bfloat16,
                 router=router,
                 custom_routing_function=router.route,
-                runner_cls=AscendMoERunner,
+                runner_cls=V41MoERunner,
                 routed_experts_cls=AscendRoutedExperts,
                 scoring_func="sqrtsoftplus",
                 renormalize=True,
@@ -112,6 +134,7 @@ class NativeMoE(nn.Module):
             {
                 "layer": prefix,
                 "runner": type(self.runner).__qualname__,
+                "runner_base": AscendMoERunner.__qualname__,
                 "routed_experts": type(layer).__qualname__,
                 "quant_method": type(layer.quant_method).__qualname__,
                 "scheme": AscendW4A8MXFPDSDynamicFusedMoEMethod.__name__,
