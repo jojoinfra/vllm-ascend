@@ -462,7 +462,7 @@ class NPUPlatform(Platform):
         # before generic safetensors iteration materializes any full tensor.
         if (
             getattr(getattr(vllm_config.model_config, "hf_config", None), "model_type", None) == "deepseek_v41"
-            and vllm_config.load_config.load_format in ("auto", "safetensors")
+            and vllm_config.load_config.load_format in ("auto", "hf", "safetensors")
         ):
             vllm_config.load_config.load_format = "deepseek_v41"
 
