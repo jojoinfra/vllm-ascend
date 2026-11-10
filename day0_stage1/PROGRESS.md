@@ -44,3 +44,4 @@
 | 2026-11-10 | 新增八卡逐路由系数检查。对主干与草稿分别实测 MC2 和 ALL2ALLV，发送端的 FP32 系数逐位到达正确专家，反向合并每条路由只乘一次。修正前的同源码目标/投机服务已分别生成 18 个诊断 token，在第 7 个输出首次分歧；修正后的完整候选正在重验。 | [八卡检查](../day0_stage2/validator/verify_expert_coefficients.py) · [token 对照](../day0_stage2/validator/check_deterministic_decode.py) |
 | 2026-11-10 | 常规分页服务现在支持从 vLLM 的实际 KV 预算自动确定页数。调度页按真实滑窗、压缩 KV、索引和 marker 的总字节计费，worker 按调度结果分配；可继续显式固定页数重放冻结配置。指定镜像 CPU 已验证 CLI 解析、跨 worker 取最小容量、内存失败后重试及显式页路径。 | [自动页预算](../vllm_ascend/models/deepseek_v41/page_pool.py) · [页池回归](../tests/ut/models/test_deepseek_v41_page_pool.py) |
 | 2026-11-10 | 正式评分汇总现在按原题序逐项关联线上请求、回复与官方 AISBench 的逐题布尔得分，并复算总分。全部记录的完整性、并发和单次尝试先行校验；中断轮没有生成分数。已通过完整、缺项、重复与矛盾记录等回归。 | [逐题核验](../day0_stage2/validator/summarize_gsm8k.py) |
+| 2026-11-10 | 计划书已加入八卡普通 `vllm serve` 的实测命令，标出 TP1 的观测开关与正式评测的零预热设置。 | [启动命令](PLAN.md#普通服务入口) |

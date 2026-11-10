@@ -17,10 +17,31 @@
 
 先检查各 rank 的目标和草稿权重、原生 experts runner、实际通信方式与图捕获。服务就绪后重放阶段一四问，并同时发起独立请求。记录有实际请求时的 decode replay、已接收与被拒绝的草稿 token、拒绝后的请求状态以及共享专家的放置和通信。共享专家按本地输出检查，路由专家按 EP8 的实际 dispatch/combine 检查。[并发功能检查](../day0_stage2/validator/check_concurrent_chat.py)
 
-独立 AISBench 客户端先核验官方评分器和输入顺序，支持用 `--dry-run` 检查最终任务配置。正式请求记录题目 ID、HTTP 状态、模型输出和在途数，并与 AISBench 逐题评分对照。题量、并发数、分数门槛以及单次尝试预算均由冻结验收文件提供。[评测启动器](../day0_stage2/validator/aisbench_gsm8k.py) · [HTTP 观测器](../day0_stage2/validator/observe_gsm8k.py)
+独立 AISBench 客户端先核验官方评分器和输入顺序，支持用 `--dry-run` 检查最终任务配置。正式运行用 `--num-warmups 0` 关闭 AISBench 从正式题取样的预热，记录每题唯一请求、HTTP 状态、模型输出和在途数，并与 AISBench 的逐题评分对照。题量、并发数、分数门槛以及单次尝试预算均由冻结验收文件提供。[评测启动器](../day0_stage2/validator/aisbench_gsm8k.py) · [HTTP 观测器](../day0_stage2/validator/observe_gsm8k.py)
 
 ### TP1 的共享专家与通信
 
 2026-11-10 按任务方要求，阶段二暂缓适配 `shared_expert_dp_enabled` 和 `sequence_parallel_enabled`。两项仅记录实际值，均可为 `false`，不作为阶段二通过条件。原生共享专家的本地计算与数值、路由专家的 EP8 分发和合并仍须验证。
 
 在已复验的 DP8 / EP8 / TP1 拓扑中，CLI 传入了 `enable_shared_expert_dp` 和 `enable_flashcomm1`。八个 rank 的主干和草稿账本均记录两个 effective 字段为 `false`。继续使用同一拓扑验证 DSpark 接受与拒绝、无投机对照、真实 decode 图重放、独立并发请求和冻结的 GSM8K 任务。[框架设置](../vllm_ascend/ascend_config.py) · [逐层账本](../vllm_ascend/models/deepseek_v41/fused_moe.py)
+
+### 普通服务入口
+
+在指定 A5 镜像中安装仓库构建的 wheel，设置 `MODEL_DIR` 为只读原始权重目录、`SERVED_MODEL` 为服务别名。下例取自已完成的八卡组合服务。HCCL 在该环境使用 AIV。手动给定页数用于重放同一部署配置。
+
+```sh
+export HCCL_OP_EXPANSION_MODE=AIV
+vllm serve "$MODEL_DIR" --served-model-name "$SERVED_MODEL" \
+  --api-server-count 1 --host 127.0.0.1 --port "$PORT" \
+  --dtype bfloat16 --data-parallel-size 8 --data-parallel-size-local 8 \
+  --enable-expert-parallel --tensor-parallel-size 1 --pipeline-parallel-size 1 \
+  --block-size 128 --num-gpu-blocks-override 145 --kv-cache-memory-bytes 16777216 \
+  --max-model-len 4096 --max-num-seqs 4 --max-num-batched-tokens 4096 \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[6,12,18,24]}' \
+  --speculative-config '{"method":"dspark","num_speculative_tokens":5}' \
+  --additional-config '{"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
+  --default-chat-template-kwargs '{"thinking_mode":"chat","reasoning_effort":"high"}' \
+  --no-enable-prefix-caching --enable-chunked-prefill --no-async-scheduling --generation-config vllm
+```
+
+示例中的两个并行开关保留已测命令行原值，在 TP1 下的生效状态见上节。阶段一 eager 配置和安装重放步骤见[阶段一说明](patch/REPLAY.md)。
