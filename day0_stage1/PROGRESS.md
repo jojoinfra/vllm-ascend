@@ -24,3 +24,4 @@
 | 2026-11-10 | 同一阶段一实现的完整 A5 原生源码 wheel 已用普通 pip wheel 构建。安装后再次独立冷启动普通服务与取证服务，并重跑八卡 Engram。两次 HTTP 结果与此前一致，八份逐层张量文件逐字节相同。 | [仓内重放步骤](patch/REPLAY.md) · [数值探针](validator/compare_traces.py) |
 | 2026-11-10 | 修正了同一批次中长短请求的 DSpark 上下文判断。接近长度上限的请求停止提案，其余请求继续；同一轮活跃或空闲的 DP worker 都只进入一次草稿计算。 | [调度回归](../tests/ut/models/test_deepseek_v41_spec_runner.py) |
 | 2026-11-10 | 评测客户端已增加 HTTP 边界观测，记录每个题目 ID 的实际请求次数、完成状态、原始生成和同时在途数。用两条合成请求核验了转发及重叠测量，尚未开始正式 GSM8K。 | [HTTP 观测](../day0_stage2/validator/observe_gsm8k.py) |
+| 2026-11-10 | 首次八卡阶段二候选已从普通 CLI 加载目标模型、独立的 DSpark 权重和所有 rank 的原生 MoE runner。启动 forward 中，ALL2ALLV 的 MX scale 张量与按 token 切分的通信尺寸不符，服务未进入 HTTP；已保留该轮及权重账本。 | [EP 分发](../vllm_ascend/ops/fused_moe/token_dispatcher.py) |
