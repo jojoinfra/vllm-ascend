@@ -15,10 +15,12 @@
 
 复验从同一仓的 wheel 和 `vllm serve` 启动。完整候选使用 eager prefill、`FULL_DECODE_ONLY`、原始权重及 `--speculative-config '{"method":"dspark","num_speculative_tokens":5}'`。冻结的验收记录提供上下文、页数、批宽、dtype、镜像和并行配置。对同一候选还会用关闭投机的确定性请求作对照。
 
-先检查各 rank 的目标和草稿权重、原生 experts runner、实际通信方式与图捕获。服务就绪后重放阶段一四问，并同时发起独立请求。记录有实际请求时的 decode replay、已接收与被拒绝的草稿 token、拒绝后的请求状态以及共享专家的放置和通信。开关是否生效由运行路径判断。[并发功能检查](../day0_stage2/validator/check_concurrent_chat.py)
+先检查各 rank 的目标和草稿权重、原生 experts runner、实际通信方式与图捕获。服务就绪后重放阶段一四问，并同时发起独立请求。记录有实际请求时的 decode replay、已接收与被拒绝的草稿 token、拒绝后的请求状态以及共享专家的放置和通信。共享专家按本地输出检查，路由专家按 EP8 的实际 dispatch/combine 检查。[并发功能检查](../day0_stage2/validator/check_concurrent_chat.py)
 
 独立 AISBench 客户端先核验官方评分器和输入顺序，支持用 `--dry-run` 检查最终任务配置。正式请求记录题目 ID、HTTP 状态、模型输出和在途数，并与 AISBench 逐题评分对照。题量、并发数、分数门槛以及单次尝试预算均由冻结验收文件提供。[评测启动器](../day0_stage2/validator/aisbench_gsm8k.py) · [HTTP 观测器](../day0_stage2/validator/observe_gsm8k.py)
 
 ### TP1 的共享专家与通信
 
-在指定 DP8 / EP8 / TP1 拓扑，前两轮服务都请求了 `enable_shared_expert_dp` 和 `enable_flashcomm1`。各 rank 的主干和草稿账本记录到相同的实际设置：共享专家在本地计算，`shared_expert_dp_enabled` 和 `sequence_parallel_enabled` 均为 false。路由专家在 EP8 上执行了跨卡交换。后续验收分别记录本地共享专家数值、EP 通信、以及这两个开关是否产生了对应的计算或通信。TP1 的序列并行通信项仍待满足。[对应框架设置](../vllm_ascend/ascend_config.py) · [逐层账本实现](../vllm_ascend/models/deepseek_v41/fused_moe.py)
+2026-11-10 按任务方要求，阶段二暂缓适配 `shared_expert_dp_enabled` 和 `sequence_parallel_enabled`。两项仅记录实际值，均可为 `false`，不作为阶段二通过条件。原生共享专家的本地计算与数值、路由专家的 EP8 分发和合并仍须验证。
+
+在已复验的 DP8 / EP8 / TP1 拓扑中，CLI 传入了 `enable_shared_expert_dp` 和 `enable_flashcomm1`。八个 rank 的主干和草稿账本均记录两个 effective 字段为 `false`。继续使用同一拓扑验证 DSpark 接受与拒绝、无投机对照、真实 decode 图重放、独立并发请求和冻结的 GSM8K 任务。[框架设置](../vllm_ascend/ascend_config.py) · [逐层账本](../vllm_ascend/models/deepseek_v41/fused_moe.py)
