@@ -38,3 +38,4 @@
 | 2026-11-10 | 前两轮组合的主干和草稿逐层账本均显示 TP1 下共享专家 DP 和序列并行未启用。已把两项的实际状态、共享专家本地数值、路由 EP 通信分别写入验收计划。 | [TP1 记录](PLAN.md#tp1-的共享专家与通信) |
 | 2026-11-10 | 新增 worker 记录汇总，按 rank 区分图捕获、带有效请求的图重放及空闲步，并核对目标验证器提交的输入行、接受前缀与丢弃数量。已用之前的八卡启动与单卡真实拒绝采样记录复核。 | [运行记录检查](../day0_stage2/validator/summarize_worker_receipts.py) |
 | 2026-11-10 | 第三轮完整源码 wheel 由普通 CLI 启动，八个 rank 均捕获四个 FULL decode 图尺寸。冻结四问与同时发出的 32 个独立短问答均通过。长诊断请求触发真实图重放，并出现 DSpark 接受和拒绝。与独立 HF CPU 对照在第 7 个输出 token 出现分歧；同候选无投机对照待测。AISBench 正式评测已启动。 | [服务检查](../day0_stage2/validator/check_concurrent_chat.py) · [采样检查](../day0_stage2/validator/summarize_worker_receipts.py) |
+| 2026-11-10 | 真实请求记录发现 AISBench 默认用第一道正式题预热，再次发送同题。已停止首轮评测，保留请求记录，未计分。评测启动器现显式传入 `--num-warmups 0`，指定镜像中重新解析后的官方任务配置确认预热次数为零。 | [评测启动器](../day0_stage2/validator/aisbench_gsm8k.py) |

@@ -69,6 +69,9 @@ def main():
         endpoint.hostname,
         "--host-port",
         str(endpoint.port),
+        # AISBench otherwise warms up on the first scored example.
+        "--num-warmups",
+        "0",
         "--num-prompts",
         str(len(ids)),
         "--batch-size",
