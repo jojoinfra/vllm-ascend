@@ -1,19 +1,17 @@
-"""vLLM text entry point for the one-sequence-per-DP eager campaign."""
-import importlib.metadata
+"""Ascend V4.1 text generation with eager DP8/EP8 execution."""
 import os
-from pathlib import Path
 
 import torch
 from torch import nn
-from transformers import PreTrainedTokenizerFast
 from vllm.distributed.parallel_state import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention import Attention
+from vllm.tokenizers import cached_tokenizer_from_config
 
 from .backend import TextBackbone
 
 
-class DeepseekV41ForCausalLM(nn.Module):
+class AscendDeepseekV41ForCausalLM(nn.Module):
     def __init__(self, *, vllm_config, prefix=""):
         super().__init__()
         p = vllm_config.parallel_config
@@ -32,10 +30,11 @@ class DeepseekV41ForCausalLM(nn.Module):
             raise RuntimeError(f"Expected eight EP members, got {group.world_size}")
         local = m.hf_text_config.n_routed_experts // group.world_size
         self.expert_range = (group.rank_in_group * local, (group.rank_in_group + 1) * local)
-        root = Path(os.environ["DSV41_REFERENCE"])
-        tokenizer = PreTrainedTokenizerFast.from_pretrained(root, local_files_only=True)
-        self.backbone = TextBackbone(root / "inference", tokenizer, device=torch.device("npu", torch.npu.current_device()),
-                                     max_seq_len=m.max_model_len, ep_group=group.device_group)
+        tokenizer = cached_tokenizer_from_config(model_config=m)
+        self.backbone = TextBackbone(
+            m.hf_text_config, tokenizer, device=torch.device("npu", torch.npu.current_device()),
+            max_seq_len=m.max_model_len, ep_group=group.device_group,
+        )
         # Register one small scheduler-visible cache group. Its metadata gives
         # the real query length apart from DP padding. Compressed KV, indexes
         # and n-gram history live in the DP rank's bounded TextBackbone buffers.
@@ -44,12 +43,13 @@ class DeepseekV41ForCausalLM(nn.Module):
                                         cache_config=vllm_config.cache_config, prefix=self.metadata_key)
         self.dim = self.backbone.dim
         self.trace = None
-        self.trace_complete = False
-        self.trace_prompt = None
-        if os.environ.get("DSV41_TRACE_DIR"):
-            from stage1_trace import read_case
-            _, case = read_case()
-            self.trace_prompt = case["prompt_ids"]
+        trace_dir = os.getenv("VLLM_ASCEND_DSV41_TRACE_DIR")
+        if trace_dir:
+            from .diagnostics import EagerTrace
+            inputs = os.environ.get("VLLM_ASCEND_DSV41_TRACE_INPUTS")
+            if not inputs:
+                raise ValueError("VLLM_ASCEND_DSV41_TRACE_INPUTS must name the trace's input directory")
+            self.trace = EagerTrace(trace_dir, inputs, self.dp_rank, group.rank_in_group)
 
     def embed_input_ids(self, input_ids):
         return self.backbone.embed(input_ids)
@@ -87,33 +87,19 @@ class DeepseekV41ForCausalLM(nn.Module):
         if n == 0:
             self.backbone.idle_forward()
             return out
+        if n < 0 or n > input_ids.numel() or n > positions.numel():
+            raise RuntimeError("Invalid scheduler query length")
         pos = positions[:n].tolist()
-        if n > input_ids.numel() or pos != list(range(pos[0], pos[0] + n)):
+        if pos != list(range(pos[0], pos[0] + n)):
             raise RuntimeError("Expected one contiguous prompt or one continuing decode token")
-        if self.trace_prompt is not None and not self.trace_complete:
-            ids = input_ids[:n].tolist()
-            if self.trace is None and pos[0] == 0 and ids == self.trace_prompt:
-                from stage1_trace import TraceWriter
-                self.trace = TraceWriter(
-                    Path(os.environ["DSV41_TRACE_DIR"]) / f"rank-{self.dp_rank}",
-                    backend="a5-eager", rank=self.dp_rank,
-                    topology=dict(dp=8, ep=8, tp=1, pp=1, ep_rank=self.backbone.placement.rank),
-                    environment={k: importlib.metadata.version(k) for k in ("torch", "torch-npu", "vllm", "vllm-ascend")},
-                )
-                self.trace.attach(self.backbone.layers)
-            if self.trace is not None:
-                self.trace.begin(ids, pos[0])
+        if self.trace is not None:
+            self.trace.begin(input_ids[:n], pos[0], self.backbone.layers)
         hidden = self.backbone(input_ids[:n].reshape(1, n), start_pos=pos[0])
         out[:n] = hidden[0]
         return out
 
     def compute_logits(self, hidden_states):
         logits = self.backbone.head(hidden_states, full_logits=True)
-        if self.trace is not None and self.trace.data is not None:
-            token = self.trace.end(logits)
-            rule = self.trace.prompts["generation"]
-            if token == rule["stop_token_id"] or len(self.trace.steps) == rule["oracle_max_tokens"]:
-                self.trace.finish()
-                self.trace = None
-                self.trace_complete = True
+        if self.trace is not None:
+            self.trace.end(logits)
         return logits

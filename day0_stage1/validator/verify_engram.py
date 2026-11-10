@@ -11,9 +11,10 @@ import numpy as np
 import torch
 from tokenizers import Tokenizer
 
-from .backend import Engram, _engram_reference
-from .engram import HostEngramEmbedding
-from .weights import _copy_tensor, read_checkpoint
+from vllm_ascend.models.deepseek_v41 import ngram
+from vllm_ascend.models.deepseek_v41.backend import Engram
+from vllm_ascend.models.deepseek_v41.engram import HostEngramEmbedding
+from vllm_ascend.models.deepseek_v41.weights import _copy_tensor, read_checkpoint
 
 
 class TokenizerView:
@@ -49,11 +50,10 @@ def probe(args):
         torch.npu.set_device(rank)
     device = torch.device(f"npu:{rank}" if args.device == "npu" else "cpu")
     tensors, _ = read_checkpoint(args.checkpoint)
-    source = _engram_reference(args.reference)
     settings = SimpleNamespace(**json.loads((args.reference / "config.json").read_text()),
                                max_seq_len=256, max_batch_size=1)
-    layout = source.EngramLayout.from_args(settings)
-    state = source.NgramHashState(settings, layout, TokenizerView(args.checkpoint / "tokenizer.json"))
+    layout = ngram.EngramLayout.from_args(settings)
+    state = ngram.NgramHashState(settings, layout, TokenizerView(args.checkpoint / "tokenizer.json"))
     digest = hashlib.sha256(args.oracle.read_bytes()).hexdigest()
     desc = json.loads(args.oracle.with_suffix(".json").read_text())
     if digest != desc["vector_sha256"]:

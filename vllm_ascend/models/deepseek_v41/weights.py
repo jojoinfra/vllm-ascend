@@ -1,6 +1,6 @@
-"""Load the frozen V4.1 HF checkpoint directly from its original shards."""
+# SPDX-License-Identifier: Apache-2.0
+"""Strict loading of original V4.1 compact safetensors and host Engram tables."""
 
-import argparse
 import gzip
 import hashlib
 import json
@@ -13,12 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-# The release index fixes *all* accepted names and source shards, including those
-# excluded from this text-only run. Its provenance is the frozen HF model snapshot.
-INDEX_SHA256 = "74b0686a3d2891980d5e303251b075a3bccae2c2ff650747db2620a649b98fa8"
 CHECKPOINT_WIDTH = {"BF16": 2, "F32": 4, "F8_E4M3": 1, "F8_E8M0": 1, "I8": 1}
 EXPERT = re.compile(r"(?:layers|mtp)\.\d+\.ffn\.experts\.(\d+)\.")
-SHARD = re.compile(r"model-\d{5}-of-\d{5}\.safetensors")
+INDEX_NAME = "model.safetensors.index.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,44 +27,66 @@ class TensorRef:
     nbytes: int
 
 
+def _unique_keys(pairs):
+    result = {}
+    for name, value in pairs:
+        if name in result:
+            raise ValueError(f"Duplicate JSON key {name!r}")
+        result[name] = value
+    return result
+
+
 def read_checkpoint(checkpoint_dir):
     root = Path(checkpoint_dir)
-    index_bytes = (root / "model.safetensors.index.json").read_bytes()
-    if hashlib.sha256(index_bytes).hexdigest() != INDEX_SHA256:
-        raise ValueError("Checkpoint index does not match the frozen HF revision")
-    index = json.loads(index_bytes)
-    weight_map = index["weight_map"]
-    tensors = {}
-    header_hashes = {}
-    for basename in sorted(set(weight_map.values())):
-        if not SHARD.fullmatch(basename):
+    index_path = root / INDEX_NAME
+    weight_map = None
+    indexed_bytes = None
+    if index_path.is_file():
+        index = json.loads(index_path.read_bytes(), object_pairs_hook=_unique_keys)
+        weight_map = index["weight_map"]
+        if not isinstance(weight_map, dict) or not weight_map:
+            raise ValueError("Empty or invalid checkpoint weight_map")
+        indexed_bytes = index.get("metadata", {}).get("total_size")
+        files = sorted(set(weight_map.values()))
+    else:
+        files = ["model.safetensors"]
+    tensors, header_hashes = {}, {}
+    for basename in files:
+        if not isinstance(basename, str) or Path(basename).name != basename or not basename.endswith(".safetensors"):
             raise ValueError(f"Invalid shard basename {basename!r}")
         shard = root / basename
         with shard.open("rb") as stream:
-            size, = struct.unpack("<Q", stream.read(8))
+            prefix = stream.read(8)
+            if len(prefix) != 8:
+                raise ValueError(f"Truncated safetensors length in {basename}")
+            size, = struct.unpack("<Q", prefix)
             if not 0 < size <= 100_000_000:
                 raise ValueError(f"Invalid safetensors header size in {basename}")
             header_bytes = stream.read(size)
+            if len(header_bytes) != size:
+                raise ValueError(f"Truncated safetensors header in {basename}")
         header_hashes[basename] = hashlib.sha256(header_bytes).hexdigest()
-        header = json.loads(header_bytes)
+        header = json.loads(header_bytes, object_pairs_hook=_unique_keys)
         header.pop("__metadata__", None)
         payload = 8 + size
         cursor = 0
         for name, entry in sorted(header.items(), key=lambda item: item[1]["data_offsets"][0]):
-            if weight_map.get(name) != basename or name in tensors:
+            if (weight_map is not None and weight_map.get(name) != basename) or name in tensors:
                 raise ValueError(f"Misindexed or duplicate key {name}")
             start, end = entry["data_offsets"]
             shape = tuple(entry["shape"])
             dtype = entry["dtype"]
-            if start != cursor or min(shape) < 1 or end - start != math.prod(shape) * CHECKPOINT_WIDTH[dtype]:
-                raise ValueError(f"Invalid byte range for {name}")
+            if (type(start) is not int or type(end) is not int or start != cursor
+                    or not shape or any(type(d) is not int or d < 1 for d in shape)
+                    or dtype not in CHECKPOINT_WIDTH or end - start != math.prod(shape) * CHECKPOINT_WIDTH[dtype]):
+                raise ValueError(f"Invalid tensor descriptor for {name}")
             tensors[name] = TensorRef(shard, payload + start, shape, dtype, end - start)
             cursor = end
         if shard.stat().st_size != payload + cursor:
             raise ValueError(f"Truncated shard or trailing payload in {basename}")
-    if weight_map.keys() != tensors.keys():
+    if weight_map is not None and weight_map.keys() != tensors.keys():
         raise ValueError("Checkpoint is missing indexed tensors")
-    if sum(t.nbytes for t in tensors.values()) != index["metadata"]["total_size"]:
+    if indexed_bytes is not None and sum(t.nbytes for t in tensors.values()) != indexed_bytes:
         raise ValueError("Indexed payload size mismatch")
     return tensors, header_hashes
 
@@ -94,11 +113,119 @@ def expert_owner(name, num_experts, ep_size):
     return expert // (num_experts // ep_size)
 
 
+def _validate_expert_headers(model, tensors, count):
+    # Check off-rank experts against one local expert per layer. This touches
+    # only header metadata: discarded experts never enter CPU or device RAM.
+    actual = {k for k in tensors if classify(k) == "expert"}
+    for layer_id, block in enumerate(model.layers):
+        ffn = block.ffn
+        if len(ffn.experts) != count:
+            raise ValueError("Inconsistent expert count across text blocks")
+        first = ffn.experts[ffn.experts_start_idx]
+        params = list(first.named_parameters())
+        for expert_id in range(count):
+            prefix = f"layers.{layer_id}.ffn.experts.{expert_id}."
+            for suffix, param in params:
+                name = prefix + suffix
+                if name not in actual:
+                    raise ValueError(f"Missing routed expert tensor {name}")
+                actual.remove(name)
+                ref = tensors[name]
+                dtype = "F8_E8M0" if suffix.endswith(".scale") else "I8"
+                if ref.dtype != dtype or tuple(param.shape) != ref.shape:
+                    raise ValueError(f"Invalid {ref.dtype} {ref.shape} for {name}")
+    if actual:
+        raise ValueError(f"Unexpected routed expert tensors {sorted(actual)[:6]}")
+
+
+def _field(config, key, default=None):
+    return config.get(key, default) if isinstance(config, dict) else getattr(config, key, default)
+
+
+def _validate_unused_headers(hf_config, tensors):
+    """Check the unallocated vision/draft schemas against the checkpoint configuration."""
+    unseen = {k for k in tensors if classify(k) in ("vision", "dspark")}
+
+    def expect(name, dtype, *shape):
+        ref = tensors.get(name)
+        if ref is None or ref.dtype != dtype or ref.shape != shape:
+            raise ValueError(f"Expected {name} with {dtype} {shape}")
+        unseen.remove(name)
+
+    text = _field(hf_config, "text_config")
+    dim = _field(text, "hidden_size")
+    vision = _field(hf_config, "checkpoint_vision_config") or _field(hf_config, "vision_config")
+    if vision:
+        vdim = _field(vision, "hidden_size")
+        inter = _field(vision, "intermediate_size")
+        patch = _field(vision, "patch_size")
+        ratio = _field(vision, "downsample_ratio")
+        for name in ("image_start", "image_end", "image_newline", "aligner.w1.bias", "aligner.w2.bias"):
+            expect(name, "BF16", dim)
+        expect("aligner.w1.weight", "BF16", dim, ratio * ratio * vdim)
+        expect("aligner.w2.weight", "BF16", dim, dim)
+        expect("vision.patch_embed.proj.weight", "BF16", vdim, 3 * patch * patch)
+        expect("vision.patch_embed.proj.bias", "BF16", vdim)
+        expect("vision.norm.weight", "BF16", vdim)
+        for i in range(_field(vision, "num_hidden_layers")):
+            for suffix, shape in {
+                "attn.wo.bias": (vdim,), "attn.wo.weight": (vdim, vdim),
+                "attn.wqkv.bias": (3 * vdim,), "attn.wqkv.weight": (3 * vdim, vdim),
+                "mlp.w1.weight": (2 * inter, vdim), "mlp.w2.weight": (vdim, inter),
+                "norm1.weight": (vdim,), "norm2.weight": (vdim,),
+            }.items():
+                expect(f"vision.blocks.{i}.{suffix}", "BF16", *shape)
+        for i in range(_field(text, "num_hidden_layers")):
+            expect(f"layers.{i}.ffn.gate.bias_vl", "F32", _field(text, "n_routed_experts"))
+
+    depth = _field(text, "num_nextn_predict_layers", 0)
+    if depth:
+        experts = _field(text, "dspark_n_routed_experts")
+        rank = _field(text, "dspark_markov_rank")
+        targets = _field(text, "dspark_target_layer_ids")
+        # A draft block shares the target block's checkpoint geometry for these
+        # defined leaves. Its expert count and its first/last-layer heads differ.
+        common = [
+            "attn.attn_sink", "attn.kv_norm.weight", "attn.q_norm.weight", "attn_norm.weight", "ffn_norm.weight",
+            *(f"hc_{which}_{part}" for which in ("attn", "ffn") for part in ("base", "fn", "scale")),
+            *(f"attn.{proj}.{part}" for proj in ("wkv", "wo_a", "wo_b", "wq_a", "wq_b")
+              for part in ("weight", "scale")),
+            *(f"ffn.shared_experts.{proj}.{part}" for proj in ("w1", "w2", "w3")
+              for part in ("weight", "scale")),
+        ]
+        for i in range(depth):
+            prefix = f"mtp.{i}."
+            for suffix in common:
+                ref = tensors["layers.0." + suffix]
+                expect(prefix + suffix, ref.dtype, *ref.shape)
+            expect(prefix + "ffn.gate.weight", "BF16", experts, dim)
+            expect(prefix + "ffn.gate.bias", "F32", experts)
+            if vision:
+                expect(prefix + "ffn.gate.bias_vl", "F32", experts)
+            for expert in range(experts):
+                for proj in ("w1", "w2", "w3"):
+                    for part in ("weight", "scale"):
+                        ref = tensors[f"layers.0.ffn.experts.0.{proj}.{part}"]
+                        expect(prefix + f"ffn.experts.{expert}.{proj}.{part}", ref.dtype, *ref.shape)
+        expect("mtp.0.main_norm.weight", "BF16", dim)
+        expect("mtp.0.main_proj.weight", "F8_E4M3", dim, dim * len(targets))
+        expect("mtp.0.main_proj.scale", "F8_E8M0", (dim + 31) // 32, (dim * len(targets) + 31) // 32)
+        prefix = f"mtp.{depth - 1}."
+        expect(prefix + "norm.weight", "BF16", dim)
+        expect(prefix + "confidence_head.proj.weight", "BF16", 1, dim + rank)
+        for projection in ("embed", "head"):
+            expect(prefix + f"markov_head.{projection}.weight", "BF16", _field(text, "vocab_size"), rank)
+    if unseen:
+        raise ValueError(f"Unexpected vision or draft tensors {sorted(unseen)[:6]}")
+
+
 def _parameter_contract(name, ref, param):
     import torch
 
     expected = {"BF16": torch.bfloat16, "F32": torch.float32, "F8_E4M3": torch.float8_e4m3fn,
                 "F8_E8M0": torch.float8_e8m0fnu, "I8": torch.int8}[ref.dtype]
+    if name.endswith(".scale") and ref.dtype != "F8_E8M0":
+        raise ValueError(f"Expected UE8M0 scale at {name}, found {ref.dtype}")
     valid = {expected}
     if ref.dtype in ("F8_E4M3", "F8_E8M0", "I8"):
         valid.add(torch.uint8)
@@ -148,24 +275,29 @@ def _copy_tensor(ref, param, files, wo_scale=None):
             target.copy_(data)
 
 
-def load_checkpoint(model, checkpoint_dir, *, ep_rank, device, ep_size=8, manifest=None):
+def load_checkpoint(model, checkpoint_dir, *, ep_rank, device, ep_size=8, manifest=None, hf_config=None):
     """Populate one rank's text backbone. Returns its loaded named-parameter set."""
     import torch
     from .engram import HostEngramEmbedding
 
-    if ep_size != 8 or not 0 <= ep_rank < ep_size:
-        raise ValueError("Stage 1 requires eight EP ranks")
+    if not 0 <= ep_rank < ep_size:
+        raise ValueError(f"Invalid EP rank {ep_rank} of {ep_size}")
     device = torch.device(device)
     before = None
     if manifest is not None and device.type == "npu":
         before = torch.npu.memory_allocated(device)
     tensors, header_hashes = read_checkpoint(checkpoint_dir)
     params = dict(model.named_parameters())
+    experts = len(model.layers[0].ffn.experts) if len(model.layers) else 0
+    _validate_expert_headers(model, tensors, experts)
+    if hf_config is None:
+        hf_config = json.loads((Path(checkpoint_dir) / "config.json").read_bytes())
+    _validate_unused_headers(hf_config, tensors)
     local, host, converted, actions = {}, {}, {}, {}
     for name, ref in tensors.items():
         family = classify(name)
         action = family
-        if family == "expert" and expert_owner(name, 384, ep_size) != ep_rank:
+        if family == "expert" and expert_owner(name, experts, ep_size) != ep_rank:
             action = "other_ep_rank"
         elif family == "engram_host":
             prefix, _, leaf = name.rpartition(".")
@@ -190,6 +322,8 @@ def load_checkpoint(model, checkpoint_dir, *, ep_rank, device, ep_size=8, manife
     if host.keys() != embeddings.keys():
         raise ValueError(f"Engram module paths differ: {sorted(embeddings)}, expected {sorted(host)}")
     for name, pair in host.items():
+        if set(pair) != {"weight", "scale"}:
+            raise ValueError(f"Incomplete or unexpected Engram table at {name}")
         embeddings[name].validate_layout(pair["weight"], pair["scale"])
     for name, ref in local.items():
         param = params[name]
@@ -214,7 +348,7 @@ def load_checkpoint(model, checkpoint_dir, *, ep_rank, device, ep_size=8, manife
     if manifest is not None:
         path = Path(manifest)
         key_path = path.with_name(path.name + ".keys.jsonl.gz")
-        with gzip.open(key_path, "xt", encoding="utf-8") as log:
+        with gzip.open(key_path, "wt", encoding="utf-8") as log:
             for name in sorted(actions):
                 print(json.dumps([name, actions[name]], separators=(",", ":")), file=log)
         memory = {}
@@ -224,51 +358,12 @@ def load_checkpoint(model, checkpoint_dir, *, ep_rank, device, ep_size=8, manife
             memory = {"before_copy_allocated": before, "after_bind_allocated": torch.npu.memory_allocated(device),
                       "process_peak_allocated": torch.npu.max_memory_allocated(device),
                       "device_free_after_bind": free, "device_total": total}
-        with path.open("x") as log:
-            json.dump({"device_type": device.type, "device_memory_bytes": memory, "ep_rank": ep_rank, "ep_size": ep_size, "index_sha256": INDEX_SHA256,
+        index = Path(checkpoint_dir) / INDEX_NAME
+        index_digest = hashlib.sha256(index.read_bytes()).hexdigest() if index.is_file() else None
+        with path.open("w") as log:
+            json.dump({"device_type": device.type, "device_memory_bytes": memory, "ep_rank": ep_rank, "ep_size": ep_size, "index_sha256": index_digest,
                        "shard_header_sha256": header_hashes, "key_actions": dict(Counter(actions.values())),
                        "all_keys": key_path.name, "named_device_parameters": len(params),
                        "parameter_bytes": sum(p.numel() * p.element_size() for p in params.values()),
                        "engram_host_file_bytes": sum(ref.nbytes for pair in host.values() for ref in pair.values())}, log)
     return set(local)
-
-
-def inventory(checkpoint_dir, output):
-    """Emit a header-only inventory, owner-level byte budget and complete key disposition."""
-    tensors, headers = read_checkpoint(checkpoint_dir)
-    ep_size = 8
-    tally, counts = Counter(), Counter()
-    resident = [Counter() for _ in range(ep_size)]
-    key_path = output.with_name(output.name + ".keys.jsonl.gz")
-    with gzip.open(key_path, "xt", encoding="utf-8") as keys:
-        for name, ref in sorted(tensors.items()):
-            family = classify(name)
-            counts[family] += 1
-            tally[family] += ref.nbytes
-            owner = expert_owner(name, 384, ep_size) if family == "expert" else None
-            print(json.dumps([name, ref.file.name, ref.offset, ref.dtype, ref.shape, ref.nbytes,
-                              family, owner], separators=(",", ":")), file=keys)
-            if family == "replicated":
-                for row in resident:
-                    row[family] += ref.nbytes
-            elif family == "expert":
-                resident[owner][family] += ref.nbytes
-    with output.open("x") as log:
-        json.dump({"scope": "source shard headers only", "index_sha256": INDEX_SHA256,
-                   "shard_header_sha256": headers, "key_counts": counts, "source_bytes": tally,
-                   "rank_native_checkpoint_bytes": resident, "per_key_file": key_path.name,
-                   "per_key_columns": ["key", "shard", "payload_file_offset", "dtype", "shape", "bytes",
-                                       "purpose", "exclusive_ep_owner"],
-                   "reasons": {"dspark": "speculative decoding disabled",
-                               "vision": "image tower/aligner/delimiters or vision-only routing bias",
-                               "expert": "routed experts owned by disjoint EP ranges",
-                               "engram_host": "read-only host file mapping of table and block scales",
-                               "replicated": "TP1 text parameters replicated across DP ranks"}}, log, indent=2)
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=inventory.__doc__)
-    parser.add_argument("checkpoint", type=Path)
-    parser.add_argument("output", type=Path)
-    args = parser.parse_args()
-    inventory(args.checkpoint, args.output)

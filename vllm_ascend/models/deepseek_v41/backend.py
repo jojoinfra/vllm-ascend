@@ -29,20 +29,17 @@ SOFTWARE.
 
 from __future__ import annotations
 
-import hashlib
-import importlib.util
-import json
 import math
-import sys
 from contextlib import contextmanager
 from functools import lru_cache
-from pathlib import Path
 from types import SimpleNamespace
 
 import torch
 from torch import nn
 from torch.nn import functional as F
 
+from .config import text_model_args
+from .ngram import EngramLayout, NgramHashState
 from .eager_kernels import act_quant, compact_linear, fp4_act_quant, hc_split_sinkhorn, sparse_attn
 from .ep import ExpertPlacement
 
@@ -794,43 +791,23 @@ class SharedAttentionRuntime:
         self.candidates: torch.Tensor | None = None
 
 
-@lru_cache(1)
-def _engram_reference(directory):
-    """Only execute the frozen n-gram definition. Keep import names process-local."""
-    src = (Path(directory) / "engram.py").read_bytes()
-    if hashlib.sha256(src).hexdigest() != "11f35ecbead8150c35aa002b3d180ef290b05a25afe883a11884f94d476d3897":
-        raise ValueError("Engram source does not match the frozen HF reference")
-    name = __package__ + "._frozen_hf_engram"
-    spec = importlib.util.spec_from_file_location(name, Path(directory) / "engram.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    exec(compile(src, spec.origin, "exec"), module.__dict__)
-    return module
-
-
 class TextBackbone(nn.Module):
     """One active sequence per DP rank. A prefill at zero starts new request state."""
-    def __init__(self, inference_dir, tokenizer, *, device, max_seq_len, ep_group, engram_embedding_factory=None):
+    def __init__(self, text_config, tokenizer, *, device, max_seq_len, ep_group, engram_embedding_factory=None):
         super().__init__()
-        values = json.loads((Path(inference_dir) / "config.json").read_text())
-        args = SimpleNamespace(gate_temp=1., norm_topk_prob=True, max_batch_size=1, max_seq_len=max_seq_len)
-        for name, value in values.items():
-            setattr(args, name, value)
+        args = text_model_args(text_config, max_batch_size=1, max_seq_len=max_seq_len)
         self.device = torch.device(device)
         self.max_seq_len = args.max_seq_len
         self.dim = args.dim
         self.hc_mult = args.hc_mult
         self.position = 0
         self.placement = ExpertPlacement(ep_group)
-        if args.dtype != "fp8" or args.expert_dtype != "fp4":
-            raise ValueError("Expected native FP8 text weights and FP4 experts")
         self.engram_hash = None
         layout = None
         if args.engram_layer_ids:
-            engram = _engram_reference(inference_dir)
-            layout = engram.EngramLayout.from_args(args)
+            layout = EngramLayout.from_args(args)
             with torch.device("cpu"):
-                self.engram_hash = engram.NgramHashState(args, layout, tokenizer)
+                self.engram_hash = NgramHashState(args, layout, tokenizer)
             if engram_embedding_factory is None:
                 from .engram import HostEngramEmbedding
                 def engram_embedding_factory(layer, rows, dim):

@@ -458,6 +458,14 @@ class NPUPlatform(Platform):
             logger.warning("Model config is missing. Skipping Ascend-specific config updates.")
             return
 
+        # The host-mapped Engram tables and EP-local experts require placement
+        # before generic safetensors iteration materializes any full tensor.
+        if (
+            getattr(getattr(vllm_config.model_config, "hf_config", None), "model_type", None) == "deepseek_v41"
+            and vllm_config.load_config.load_format in ("auto", "safetensors")
+        ):
+            vllm_config.load_config.load_format = "deepseek_v41"
+
         cls._validate_indexer_pp_config(vllm_config)
 
         _validate_draft_decode_context_parallel_config(vllm_config)
