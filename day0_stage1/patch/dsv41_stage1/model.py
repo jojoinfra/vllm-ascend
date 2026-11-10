@@ -39,7 +39,7 @@ class DeepseekV41ForCausalLM(nn.Module):
         # Register one small scheduler-visible cache group. Its metadata gives
         # the real query length apart from DP padding. Compressed KV, indexes
         # and n-gram history live in the DP rank's bounded TextBackbone buffers.
-        self.metadata_key = f"{prefix + '.' if prefix else ''}model.layers.0.attention"
+        self.metadata_key = f"{prefix + '.' if prefix else ''}model.layers.0.self_attn.attn"
         self.metadata_layer = Attention(1, 128, 128 ** -0.5, num_kv_heads=1,
                                         cache_config=vllm_config.cache_config, prefix=self.metadata_key)
         self.dim = self.backbone.dim
