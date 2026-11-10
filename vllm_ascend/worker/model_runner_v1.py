@@ -3011,6 +3011,7 @@ class NPUModelRunner(GPUModelRunner):
             forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
             and not forward_context.capturing
             and not self.use_sparse and not self.use_compress
+            and getattr(self, "requires_graph_param_update", True)
         ):
             if self.enable_enpu:
                 torch.npu.current_stream().synchronize()
@@ -3842,7 +3843,11 @@ class NPUModelRunner(GPUModelRunner):
         ):
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_padded <= self.max_num_tokens
-            if self.supports_mm_inputs and not self.model_config.is_encoder_decoder or self.enable_prompt_embeds:
+            if self.supports_mm_inputs and not self.model_config.is_encoder_decoder:
+                # Preserve raw tokens for multimodal models with token-history
+                # state, matching the regular GPUModelRunner preprocessor.
+                input_ids, inputs_embeds = self._prepare_mm_inputs(num_tokens_padded)
+            elif self.enable_prompt_embeds:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded]
             else:
@@ -4454,6 +4459,7 @@ class NPUModelRunner(GPUModelRunner):
                     or self.hybrid_with_attn_and_mamba
                     or "cache_only_layers" in layer_name
                     or is_hidden_state_cache_spec(layer_kv_cache_spec.get(layer_name))
+                    or getattr(layer_kv_cache_spec.get(layer_name), "single_tensor_cache", False)
                 ) and layer_name not in kv_cache_raw_tensors:
                     # Check if shared_by contains both MambaSpec and HiddenStateCacheSpec.
                     # If so, they must use separate physical memory to avoid corruption:
@@ -4683,7 +4689,22 @@ class NPUModelRunner(GPUModelRunner):
 
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
-                if self.use_compress and isinstance(current_kv_cache_spec,
+                if getattr(current_kv_cache_spec, "single_tensor_cache", False):
+                    raw_tensor = kv_cache_raw_tensors[layer_name]
+                    assert raw_tensor.numel() % current_kv_cache_spec.page_size_bytes == 0
+                    num_blocks = raw_tensor.numel() // current_kv_cache_spec.page_size_bytes
+                    assert num_blocks >= kv_cache_config.num_blocks
+                    shape = attn_backend.get_kv_cache_shape(
+                        num_blocks,
+                        current_kv_cache_spec.storage_block_size,
+                        current_kv_cache_spec.num_kv_heads,
+                        current_kv_cache_spec.head_size,
+                    )
+                    kv_caches[layer_name] = self._adjust_kv_layout(
+                        raw_tensor, [shape], [current_kv_cache_spec.dtype],
+                        current_kv_cache_spec.page_size_bytes,
+                    )[0]
+                elif self.use_compress and isinstance(current_kv_cache_spec,
                                                     (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec)):
                     kv_tensor = kv_cache_raw_tensors[layer_name]
                     sum_page_size_bytes = kv_tensor.numel()
@@ -5199,6 +5220,15 @@ class NPUModelRunner(GPUModelRunner):
 
         for i, attn_backend_map in enumerate(attention_backend_maps):
             self.attn_groups.append(create_attn_groups(attn_backend_map, i))
+
+        # A backend using only persistent device tensors needs no FIA task
+        # parameter update. Preserve the existing path for unannotated or
+        # mixed backends; do not infer this capability from the model name.
+        self.requires_graph_param_update = not attention_backend_list or any(
+            getattr(backend, "requires_graph_param_update", True)
+            for backends in attention_backend_list
+            for backend in backends
+        )
 
         device_metadata_providers = {
             id(builder): builder

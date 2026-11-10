@@ -2,6 +2,18 @@ from vllm import ModelRegistry
 
 
 def register_model():
+    # Lazy registration keeps configuration/model discovery free of weight I/O.
+    from vllm.model_executor.model_loader import register_model_loader
+
+    from vllm_ascend.patch.worker.deepseek_v41_loader import DeepseekV41ModelLoader
+
+    ModelRegistry.register_model(
+        "DeepseekV41ForCausalLM", "vllm_ascend.patch.worker.deepseek_v41_model:DeepseekV41ForCausalLM"
+    )
+    ModelRegistry.register_model(
+        "DeepseekV41DSparkForCausalLM", "vllm_ascend.patch.worker.deepseek_v41_dspark:DeepseekV41DSparkForCausalLM"
+    )
+    register_model_loader("deepseek_v41")(DeepseekV41ModelLoader)
     ModelRegistry.register_model(
         "KimiLinearForCausalLM",
         "vllm_ascend.models.kimi_k3:AscendKimiLinearForCausalLM",

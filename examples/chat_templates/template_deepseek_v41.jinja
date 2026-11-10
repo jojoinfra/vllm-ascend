@@ -1,0 +1,59 @@
+{# Text/image chat encoding from the pinned official V4.1 encoder. #}
+{%- if tools %}{{ raise_exception('This template supports text/image chat; tool encoding is not implemented.') }}{% endif -%}
+{%- set thinking = enable_thinking | default(true) -%}
+{%- set effort = reasoning_effort | default('high', true) -%}
+{%- if effort is string -%}
+    {%- set effort = {'low': 50, 'high': 75, 'max': 100}.get(effort, 0) -%}
+{%- endif -%}
+{%- if effort is not integer or effort < 1 or effort > 100 -%}
+    {{- raise_exception('reasoning_effort must be an integer from 1 to 100, or low/high/max.') -}}
+{%- endif -%}
+{%- macro render_content(content) -%}
+    {%- if content is string -%}
+        {{- content -}}
+    {%- elif content is iterable -%}
+        {%- for block in content -%}
+            {%- if not loop.first %}{{ '\n\n' }}{% endif -%}
+            {%- if block.type == 'text' -%}
+                {{- block.text -}}
+            {%- elif block.type in ['image', 'image_url'] -%}
+                {{- '<｜deepseek_image｜>' -}}
+            {%- else -%}
+                {{- raise_exception('Only text and image content blocks are supported.') -}}
+            {%- endif -%}
+        {%- endfor -%}
+    {%- endif -%}
+{%- endmacro -%}
+{{- bos_token -}}
+{%- for message in messages -%}
+    {%- set role = message.role -%}
+    {%- if message.tool_calls -%}
+        {{- raise_exception('Tool-call messages require the official tool encoder.') -}}
+    {%- endif -%}
+    {%- if loop.first and (thinking or role == 'system') %}{{ '<｜System｜>' }}{% endif -%}
+    {%- if loop.first and thinking -%}
+        {{- 'Reasoning Effort: ' ~ effort ~ ' (range 1-100, the higher the value, the more thorough the reasoning)\n\n' -}}
+    {%- endif -%}
+    {%- if role == 'user' -%}
+        {%- if not loop.first and messages[loop.index0 - 1].role == 'user' -%}
+            {{- '\n\n' -}}
+        {%- else -%}
+            {{- '<｜User｜>' -}}
+        {%- endif -%}
+        {{- render_content(message.content) -}}
+    {%- elif role == 'system' -%}
+        {%- if not loop.first %}{{ '<｜System｜>' }}{% endif -%}
+        {{- render_content(message.content) -}}
+    {%- elif role == 'assistant' -%}
+        {{- render_content(message.content) ~ eos_token -}}
+    {%- else -%}
+        {{- raise_exception('Only system, user and assistant roles are supported.') -}}
+    {%- endif -%}
+    {%- if role == 'user' or (role == 'system' and not loop.first) -%}
+        {%- if not loop.last and messages[loop.index].role == 'assistant' -%}
+            {{- '<｜Assistant｜></think>' -}}
+        {%- elif loop.last and add_generation_prompt -%}
+            {{- '<｜Assistant｜>' ~ ('<think>' if thinking else '</think>') -}}
+        {%- endif -%}
+    {%- endif -%}
+{%- endfor -%}

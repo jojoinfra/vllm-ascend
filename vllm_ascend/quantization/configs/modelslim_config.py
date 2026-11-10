@@ -151,6 +151,14 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
     },
+    "deepseek_v41": {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+    },
+    "deepseek_v41_text": {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+    },
     "pangu_ultra_moe": {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
@@ -950,9 +958,9 @@ class AscendModelSlimConfig(QuantizationConfig):
         """
         from vllm_ascend.quantization.utils import get_model_file
 
-        # If quant_description is already populated (e.g. from from_config()),
-        # there is nothing to do.
-        if self.quant_description:
+        # HF config may contain only the quantizer selector. That is not a
+        # per-layer ModelSlim description; it still requires the sidecar file.
+        if self.quant_description and self.quant_description != {"quant_method": ASCEND_QUANTIZATION_METHOD}:
             return
 
         # Try to get the config file (local or remote)

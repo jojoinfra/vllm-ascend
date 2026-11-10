@@ -109,6 +109,15 @@ class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
         self.assertIsNone(active_executor)
 
     def test_dummy_full_uses_external_events_without_global_wait(self):
+        self._check_dummy_full_inputs(multimodal=False, raw_tokens=False)
+
+    def test_dummy_full_retains_raw_tokens_for_multimodal_history(self):
+        self._check_dummy_full_inputs(multimodal=True, raw_tokens=True)
+
+    def test_dummy_full_omits_raw_tokens_for_embedding_only_multimodal(self):
+        self._check_dummy_full_inputs(multimodal=True, raw_tokens=False)
+
+    def _check_dummy_full_inputs(self, *, multimodal, raw_tokens):
         from contextlib import contextmanager, nullcontext
 
         events = []
@@ -132,16 +141,18 @@ class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
         runner.lora_config = None
         runner.max_num_tokens = 4
         runner.device = torch.device("cpu")
-        runner.supports_mm_inputs = False
+        runner.supports_mm_inputs = multimodal
         runner.model_config = SimpleNamespace(is_encoder_decoder=False)
         runner.enable_prompt_embeds = False
         runner.input_ids = SimpleNamespace(gpu=torch.zeros(4, dtype=torch.int64))
+        runner.inputs_embeds = SimpleNamespace(gpu=torch.ones(4, 1))
         runner.uses_mrope = False
         runner.uses_xdrope_dim = 0
         runner.positions = torch.zeros(4, dtype=torch.int64)
         runner.drafter = None
         runner.vllm_config = MagicMock()
         runner.model = MagicMock()
+        runner.model.requires_raw_input_tokens = raw_tokens
         runner._has_sinks = False
         runner.use_aux_hidden_state_outputs = False
         runner.use_compress = False
@@ -149,6 +160,15 @@ class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
 
         def model_forward(*args):
             events.append("forward")
+            _, input_ids, _, _, inputs_embeds = args
+            if not multimodal or raw_tokens:
+                torch.testing.assert_close(input_ids, runner.input_ids.gpu)
+            else:
+                self.assertIsNone(input_ids)
+            if multimodal:
+                torch.testing.assert_close(inputs_embeds, runner.inputs_embeds.gpu)
+            else:
+                self.assertIsNone(inputs_embeds)
             return torch.zeros((4, 1))
 
         runner._model_forward = MagicMock(side_effect=model_forward)

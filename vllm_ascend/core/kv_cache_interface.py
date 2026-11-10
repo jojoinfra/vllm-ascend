@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass, replace
+from typing import ClassVar, Self
 
 import torch
-from typing_extensions import Self
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
@@ -224,7 +224,35 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
         )
 
 
+@dataclass(frozen=True, kw_only=True)
+class AscendTokenCacheSpec(AscendMLAAttentionSpec):
+    """One paged tensor, without the MLA runner's K/rope split.
+
+    Used for token history and shared compressed latents. Physical rows may
+    represent multiple logical tokens through ``compress_ratio``.
+    """
+
+    single_tensor_cache: ClassVar[bool] = True
+
+
+@dataclass(frozen=True, kw_only=True)
+class AscendSlidingTokenCacheSpec(AscendSlidingWindowMLASpec):
+    """Scheduler-owned sliding token state in one block-strided tensor."""
+
+    single_tensor_cache: ClassVar[bool] = True
+
+
 def register_ascend_kv_cache_specs() -> None:
+    KVCacheSpecRegistry.register(
+        kvcache_spec_cls=AscendTokenCacheSpec,
+        manager_class=FullAttentionManager,
+        uniform_type_base_spec=FullAttentionSpec,
+    )
+    KVCacheSpecRegistry.register(
+        kvcache_spec_cls=AscendSlidingTokenCacheSpec,
+        manager_class=SlidingWindowManager,
+        uniform_type_base_spec=SlidingWindowMLASpec,
+    )
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendMLAAttentionSpec,
         manager_class=FullAttentionManager,

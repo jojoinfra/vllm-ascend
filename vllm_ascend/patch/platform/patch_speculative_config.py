@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from copy import copy
+from copy import copy, deepcopy
 
 from transformers import DeepseekV2Config, PretrainedConfig
 from vllm.config.speculative import SpeculativeConfig
@@ -25,6 +25,20 @@ if hasattr(DeepseekV2Config, "__class_validators__"):
 
 
 def _normalize_legacy_qwen3_dspark_config(hf_config: PretrainedConfig) -> PretrainedConfig:
+    if hf_config.model_type == "deepseek_v41":
+        # Draft ModelConfig needs the text dimensions at the top level. Keep
+        # the target's composite config and its expert counts unchanged.
+        text = deepcopy(hf_config.get_text_config())
+        text.architectures = ["DeepseekV41DSparkForCausalLM"]
+        text.n_routed_experts = text.dspark_n_routed_experts
+        text.num_experts_per_tok = text.dspark_num_experts_per_tok
+        text.n_mtp_layers = text.num_nextn_predict_layers
+        text.n_predict = text.dspark_block_size
+        text.ptd_token_id = text.dspark_noise_token_id
+        text.sample_from_anchor = True
+        if hasattr(hf_config, "quantization_config"):
+            text.quantization_config = deepcopy(hf_config.quantization_config)
+        return text
     hf_config = _orig_hf_config_override(hf_config)
     architectures = hf_config.architectures or ()
     if hf_config.model_type == "qwen3" and "DSparkDraftModel" in architectures:
@@ -59,6 +73,15 @@ def _dspark_post_init(self):
     # TODO: This block can be deleted after the upstream supports the overlay of mla dcp and dspark
     with _temporarily_disable_dspark_dcp(self):
         _orig_post_init(self)
+    if self.use_dspark() and self.target_model_config.hf_config.model_type == "deepseek_v41":
+        # vLLM 0.27.1 unconditionally selects the V4 architecture for native
+        # DeepSeek DSpark. Restore the plugin architecture after that default.
+        draft_hf = self.draft_model_config.hf_config
+        draft_hf.model_type = "deepseek_v41_text"
+        draft_hf.architectures = ["DeepseekV41DSparkForCausalLM"]
+        self.update_arch_()
+        if self.num_speculative_tokens != draft_hf.dspark_block_size:
+            raise ValueError("V4.1 DSpark requires the checkpoint's exact dspark_block_size")
     if self.use_dspark():
         draft_model_config = getattr(self, "draft_model_config", None)
         draft_hf_config = getattr(draft_model_config, "hf_config", None)
