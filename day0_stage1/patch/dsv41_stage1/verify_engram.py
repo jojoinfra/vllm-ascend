@@ -125,7 +125,8 @@ def probe(args):
                 x = h.float()
                 rstd = (x.square().mean(-1) + settings.norm_eps).rsqrt() * (k.square().mean(-1) + settings.norm_eps).rsqrt()
                 dot = (x * (block.q_weight.float() * block.k_weight.float()) * k).sum(-1) * rstd * settings.dim**-0.5
-                gate = torch.sigmoid(torch.copysign(dot.abs().clamp_min(block.clamp_value).sqrt(), dot))
+                magnitude = dot.abs().clamp_min(block.clamp_value).sqrt()
+                gate = torch.sigmoid(torch.where(torch.signbit(dot), -magnitude, magnitude))
                 report["gate_coefficients"] = compare(gate, obs[key + "gate"])
             report.update(lookup_calls=embedding.lookup_calls, requested_rows=embedding.requested_rows,
                           transferred_rows=embedding.transferred_rows,

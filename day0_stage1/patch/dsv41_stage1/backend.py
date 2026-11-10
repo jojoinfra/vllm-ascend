@@ -133,7 +133,8 @@ class Engram(nn.Module):
         rstd = torch.rsqrt(h.square().mean(-1) + eps) * torch.rsqrt(key.square().mean(-1) + eps)
         dot = (h * weight * key).sum(-1) * rstd * self.dim**-0.5
         # signed sqrt before the sigmoid, matching the training kernel
-        gate = torch.sigmoid(torch.copysign(dot.abs().clamp_min(self.clamp_value).sqrt(), dot))
+        magnitude = dot.abs().clamp_min(self.clamp_value).sqrt()
+        gate = torch.sigmoid(torch.where(torch.signbit(dot), -magnitude, magnitude))
         if token_mask is not None:
             gate = gate.masked_fill(~token_mask.unsqueeze(-1), 0)
         return (h + gate.unsqueeze(-1) * value.float().unsqueeze(-2)).to(x.dtype)
