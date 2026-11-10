@@ -6,6 +6,7 @@ from functools import cache
 from pathlib import Path
 
 import torch
+from vllm.config import set_current_vllm_config
 from vllm.model_executor.model_loader import register_model_loader
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.weight_utils import (
@@ -14,6 +15,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_download_from_modelscope,
 )
 
+from vllm_ascend import envs
 from vllm_ascend.models.deepseek_v41.weights import load_checkpoint
 
 
@@ -24,6 +26,15 @@ def register_deepseek_v41_loader():
 
 
 class DeepseekV41ModelLoader(BaseModelLoader):
+    def load_model(self, vllm_config, model_config, prefix=""):
+        model = super().load_model(vllm_config, model_config, prefix)
+        finalize = getattr(model, "finalize_after_load", None)
+        if finalize is not None:
+            with set_current_vllm_config(vllm_config, prefix=prefix):
+                finalize(receipt_dir=envs.VLLM_ASCEND_DSV41_RESULTS_DIR)
+            model.eval()
+        return model
+
     def _checkpoint_dir(self, model_config):
         name = model_config.model
         revision = model_config.revision
@@ -61,7 +72,7 @@ class DeepseekV41ModelLoader(BaseModelLoader):
         backbone = model.backbone
         ep = backbone.placement
         device = backbone.device
-        output = os.environ.get("VLLM_ASCEND_DSV41_RESULTS_DIR")
+        output = envs.VLLM_ASCEND_DSV41_RESULTS_DIR
         manifest = None
         if output:
             output = Path(output)

@@ -4134,7 +4134,8 @@ class NPUModelRunner(GPUModelRunner):
                         enable_enpu=self.enable_enpu,
                     )
             elif cudagraph_mode.has_full_cudagraphs():
-                self.model = ACLGraphWrapper(
+                wrapper_cls = getattr(self.model, "ascend_full_graph_wrapper_cls", ACLGraphWrapper)
+                self.model = wrapper_cls(
                     self.model,
                     self.vllm_config,
                     runtime_mode=CUDAGraphMode.FULL,

@@ -12,6 +12,18 @@ from .backend import TextBackbone
 
 
 class AscendDeepseekV41ForCausalLM(nn.Module):
+    def __new__(cls, *, vllm_config=None, prefix=""):
+        if cls is AscendDeepseekV41ForCausalLM and vllm_config is not None:
+            if (
+                vllm_config.scheduler_config.max_num_seqs > 1
+                or vllm_config.speculative_config is not None
+                or not vllm_config.model_config.enforce_eager
+            ):
+                from .graph_model import DeepseekV41Stage2ForCausalLM
+
+                cls = DeepseekV41Stage2ForCausalLM
+        return super().__new__(cls)
+
     def __init__(self, *, vllm_config, prefix=""):
         super().__init__()
         p = vllm_config.parallel_config
