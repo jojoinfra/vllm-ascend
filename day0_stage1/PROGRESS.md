@@ -15,3 +15,4 @@
 | 2026-11-10 | 阶段二在单张 A5 上用真实主干与草稿权重核对 MoEHashTopk、RMSNorm、FP8 和 MXFP4 矩阵调用，并捕获后重放路由图。路由选择与独立计算一致，部分 FP8 矩阵输出有 BF16 舍入差异。此项覆盖单算子。 | [原生算子](../vllm_ascend/models/deepseek_v41/native_ops.py) · [上卡检查](../day0_stage2/validator/verify_native.py) |
 | 2026-11-10 | 已加入按 vLLM 物理 KV 页保存请求历史的实现。交错请求、换序分块、拒绝后覆盖和释放后复用页均与 HF 全前缀哈希对齐，非法 slot 会被拒绝。 | [请求状态](../vllm_ascend/models/deepseek_v41/decode_state.py) · [回归用例](../tests/ut/models/test_deepseek_v41_paged_history.py) |
 | 2026-11-10 | 三层 DSpark 草稿、顺序 Markov head 和 confidence head 已加载原始权重，复用了目标 embedding 和输出 head。单卡用冻结的目标层输出验证了完整五位提案，原生量化下提案 token 均与 HF CPU 对照一致，confidence 数值仍有差异。 | [草稿模型](../vllm_ascend/models/deepseek_v41/dspark.py) · [对照探针](../day0_stage2/validator/verify_dspark.py) |
+| 2026-11-10 | 评测客户端已按冻结的 AISBench 配置完成 dry-run。检查了官方题目顺序、评分器源码和最终解析的 reader 范围、总并发、输出上限与单次尝试。正式评测等待组合服务。 | [评测启动器](../day0_stage2/validator/aisbench_gsm8k.py) |
