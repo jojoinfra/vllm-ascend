@@ -5445,6 +5445,13 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config:
                 set_draft_graph_params(capture_sizes)
 
+    def _warmup_and_capture(self, desc: BatchDescriptor, cudagraph_runtime_mode: CUDAGraphMode, *args, **kwargs):
+        warmup = nullcontext
+        if desc.uniform and cudagraph_runtime_mode == CUDAGraphMode.FULL:
+            warmup = getattr(self.get_model(), "full_decode_graph_warmup", nullcontext)
+        with warmup():
+            return super()._warmup_and_capture(desc, cudagraph_runtime_mode, *args, **kwargs)
+
     def capture_model(self) -> int:
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""
         parent_module_name = _get_gpu_model_runner_module_name(self)

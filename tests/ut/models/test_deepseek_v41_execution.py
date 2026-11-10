@@ -3,8 +3,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+import torch
 from torch import nn
-from vllm.config import get_current_vllm_config
+from vllm.config import CUDAGraphMode, get_current_vllm_config
+from vllm.forward_context import BatchDescriptor
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 
 from vllm_ascend.model_loader.deepseek_v41 import DeepseekV41ModelLoader
@@ -61,3 +63,49 @@ def test_finalization_follows_generic_weight_loading(monkeypatch, tmp_path):
             generic.assert_called_once_with(config, model_config, "target")
     assert calls == [(config, str(tmp_path))]
     assert not model.new_child.training
+
+
+def test_uniform_full_decode_warmup_uses_capture_context(monkeypatch):
+    import vllm_ascend.ops  # noqa: F401  (the worker initializes custom ops before the runner)
+    from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+    target = object.__new__(DeepseekV41Stage2ForCausalLM)
+    nn.Module.__init__(target)
+    target.history = SimpleNamespace(max_len=4096)
+    target._warming_full_decode_graph = False
+    target._inside_full_wrapper = True
+    staged_length = 1
+    target._prepare = lambda *_: (staged_length, 0, -1)
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.model = target
+    widths = []
+
+    def observe_dummy(num_tokens, *, cudagraph_runtime_mode, is_graph_capturing=False, **kwargs):
+        if is_graph_capturing and cudagraph_runtime_mode != CUDAGraphMode.FULL:
+            return
+        with patch.object(torch.npu, "is_current_stream_capturing", return_value=is_graph_capturing):
+            widths.append(target._stage_attention_context(None, None))
+
+    runner._dummy_run = observe_dummy
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+    with patch.object(torch.npu, "is_current_stream_capturing", return_value=False):
+        for mode, uniform, expected in (
+            (CUDAGraphMode.FULL, True, [4096, 4096]),
+            (CUDAGraphMode.FULL, False, [1, 4096]),
+            (CUDAGraphMode.PIECEWISE, True, [1]),
+        ):
+            desc = BatchDescriptor(num_tokens=6, uniform=uniform)
+            runner._warmup_and_capture(desc, mode, num_warmups=1)
+            assert widths == expected
+            widths.clear()
+            # An ordinary memory profile still uses only its inactive scratch row.
+            assert target._stage_attention_context(None, None) == 1
+
+        def fail_dummy(*args, **kwargs):
+            raise RuntimeError("injected warmup failure")
+
+        runner._dummy_run = fail_dummy
+        with pytest.raises(RuntimeError, match="injected warmup failure"):
+            runner._warmup_and_capture(BatchDescriptor(num_tokens=6, uniform=True), CUDAGraphMode.FULL, num_warmups=1)
+        staged_length = 11
+        assert target._stage_attention_context(None, None) == 11

@@ -2,6 +2,7 @@
 
 import json
 import logging
+from contextlib import contextmanager
 from copy import copy
 from pathlib import Path
 
@@ -133,6 +134,7 @@ class DeepseekV41Stage2ForCausalLM(AscendDeepseekV41ForCausalLM):
         self.receipt = None
         self.moe_prefix = f"{prefix + '.' if prefix else ''}model.layers"
         self._inside_full_wrapper = False
+        self._warming_full_decode_graph = False
 
     def finalize_after_load(self, receipt_dir=None):
         from .fused_moe import install_native_layers
@@ -193,6 +195,25 @@ class DeepseekV41Stage2ForCausalLM(AscendDeepseekV41ForCausalLM):
     def embed_input_ids(self, input_ids):
         return self.backbone.embed(input_ids)
 
+    @contextmanager
+    def full_decode_graph_warmup(self):
+        previous = self._warming_full_decode_graph
+        self._warming_full_decode_graph = True
+        try:
+            yield
+        finally:
+            self._warming_full_decode_graph = previous
+
+    def _stage_attention_context(self, input_ids, positions):
+        if torch.npu.is_current_stream_capturing():
+            if not self._inside_full_wrapper:
+                raise RuntimeError("Full capture requires the V4.1 paged graph wrapper")
+            return self.history.max_len
+        context, _, _ = self._prepare(input_ids, positions)
+        # Warm the same indexer/top-k and sparse attention shapes as capture.
+        # Dummy rows still write only to their reserved scratch slots.
+        return self.history.max_len if self._warming_full_decode_graph else context
+
     def forward(self, input_ids, positions, intermediate_tensors=None, inputs_embeds=None, **kwargs):
         if input_ids is None or inputs_embeds is not None or intermediate_tensors is not None:
             raise ValueError("Expected text token IDs and one pipeline stage")
@@ -201,12 +222,7 @@ class DeepseekV41Stage2ForCausalLM(AscendDeepseekV41ForCausalLM):
         width = input_ids.numel()
         if positions.numel() != width or not 0 < width <= self.stage.max_tokens:
             raise ValueError("Inconsistent input shape or a batch wider than the configured stage")
-        if torch.npu.is_current_stream_capturing():
-            if not self._inside_full_wrapper:
-                raise RuntimeError("Full capture requires the V4.1 paged graph wrapper")
-            context = self.history.max_len
-        else:
-            context, _, _ = self._prepare(input_ids, positions)
+        context = self._stage_attention_context(input_ids, positions)
         safe_ids = torch.where(self.stage.active[:width], input_ids, 0)
         h = self.backbone.embed(safe_ids).reshape(1, width, 1, self.dim).expand(-1, -1, self.backbone.hc_mult, -1)
         pre = make_identity_pre_mix(h, self.backbone.hc_mult)
