@@ -57,3 +57,4 @@
 | 2026-11-10 | 已按任务方指示启动阶段三。计划已登记缓存开关与请求隔离、绑核开关与逐线程 affinity、1M 单请求边界及 GPQA-Diamond 全集。阶段二新 wheel 的 34 项仓内 CPU UT、八卡四问和并发 32 已完成；同 rank 投机对照仍有 token 差异，新一轮正式评分独立归档。 | [阶段三计划](PLAN.md#阶段三的服务与验收) · [对照工具](../day0_stage2/validator/check_deterministic_decode.py) |
 | 2026-11-10 | 阶段三验收输入协议和判据已冻结。在当前八卡服务上直接读取 Linux 线程掩码，八个 worker 的主线程、ACL 和释放线程共 24 个均位于各自 NPU 的本地 NUMA CPU 范围。显式关闭和开启绑核的对照会在阶段三候选上执行。 | [逐线程检查](../day0_stage3/validator/check_affinity.py) |
 | 2026-11-10 | 已在指定镜像用 checkpoint tokenizer 和仓内聊天模板生成 1M 界内、超界及中间档的精确输入。每份清单记录输入哈希和首中尾三枚检索标记的位置。实机检查会同时核对服务 tokenization、usage、实际回答和超限 HTTP 状态。 | [长请求检查](../day0_stage3/validator/context_probe.py) |
+| 2026-11-10 | 已冻结四个前缀探针，它们在固定 rank 上应分别命中 0、256、128、0 个 token。检查器会核对实际缓存计数、完整输入和生成 token，并逐次与同候选的 cache-off 输出比较。合成回执测试能检出漏命中和输出变化。 | [缓存探针](../day0_stage3/validator/prefix_probe.py) |
