@@ -3514,6 +3514,11 @@ class NPUModelRunner(GPUModelRunner):
                 assert isinstance(attn_metadata, list)
                 attn_metadata_dict = attn_metadata[ubid]
 
+            if getattr(self.model_config.hf_text_config, "model_type", None) == "deepseek_v41_text":
+                # A short prompt extension and a decode step can have the same
+                # query width. Preserve the actual prompt boundary in row order.
+                attn_metadata_i.v41_prompt_lengths = self.input_batch.num_prompt_tokens[:num_reqs].copy()
+
             for layer_name in attn_group.layer_names:
                 attn_metadata_dict[layer_name] = attn_metadata_i
 

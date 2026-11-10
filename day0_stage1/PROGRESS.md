@@ -49,3 +49,4 @@
 | 2026-11-10 | 确定性探针支持使用 vLLM 的 DP rank 请求头，让带投机和无投机的两次请求落到同一张卡。比对前同时核对输入、生成参数与选择的 rank。 | [固定 rank 对照](../day0_stage2/validator/check_deterministic_decode.py) |
 | 2026-11-10 | 在指定镜像的独立 CPU 容器安装带自动页池的源码 wheel，按仓库的 UT 初始化运行全部 V4.1 模型单测，32 项通过。另用真实权重和拒绝轨迹检查分页注意力，对固定前缀改变候选后缀时，五个代表层的已提交输出和缓存均一致。 | [模型 UT](../tests/ut/models/) · [分页注意力](../vllm_ascend/models/deepseek_v41/graph_ops.py) |
 | 2026-11-10 | 零预热正式评测已越过半程，客户端实测峰值并发 32。已回传的请求均为 HTTP 200，已发出的题目均只有一次请求。官方逐题评分在推理结束后核对。 | [HTTP 核验](../day0_stage2/validator/observe_gsm8k.py) · [官方评分核验](../day0_stage2/validator/summarize_gsm8k.py) |
+| 2026-11-10 | 分页注意力现在按每个请求的实际 prompt 长度排列 raw window 与压缩键，续解时按 HF 顺序遍历环形缓存。针对已观察到的短 eager 与 FULL 图窗口差异做了 CPU 干预，同一前缀的第一个压缩注意力层出现了差异，在该步对齐键的排列后各观测点相同。混批、短前缀和环回的 CPU 回归覆盖了新布局，八卡复验继续。 | [窗口实现](../vllm_ascend/models/deepseek_v41/graph_ops.py) · [混批检查](../tests/ut/models/test_deepseek_v41_window_layout.py) |

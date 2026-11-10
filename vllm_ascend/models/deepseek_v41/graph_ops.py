@@ -121,22 +121,47 @@ def _select(attn, x, qr, freq, state, source, context, candidate):
     return torch.cat(selected), torch.cat(masks) if idx.is_candidate_source else candidate
 
 
-def _sparse(q, window, compressed, win_ids, comp_ids, attn):
+def _raw_window(state, count, context, window_size):
+    pos = state.pos[:count, None]
+    prompts = state.prompt_lengths[:count, None]
+    prefill = pos < prompts
+    # The HF prompt stores an uninitialized tail after visible keys. Decoding
+    # traverses the ring oldest-first, including its unfilled leading slots.
+    width = window_size
+    if state.raw_span_hint is not None and context != state.history.max_len:
+        width = min(max(context, state.raw_span_hint), window_size)
+    columns = torch.arange(width, device=pos.device)
+    begin = pos - window_size + 1
+    positions = torch.where(prefill, begin.clamp_min(0), begin) + columns
+    span = torch.where(prefill, prompts.clamp_max(window_size), window_size)
+    span = torch.where(state.active[:count, None], span, width)
+    valid = state.active[:count, None] & (columns < span) & (positions >= 0) & (positions <= pos)
+    ids = state.physical(positions.clamp(0, state.history.max_len - 1), slice(0, count))
+    return torch.where(valid, ids, -1), span
+
+
+def _sparse(q, window, compressed, win_ids, comp_ids, attn, raw_spans):
     """HF 64-key online softmax, including the BF16 exponent rounding and sink logit."""
     count, heads, dim = q.shape
     result = torch.empty_like(q)
     for start in range(0, count, 32):
         rows = slice(start, min(start + 32, count))
         w = win_ids[rows]
-        masks = [w >= 0]
-        values = [window[w.clamp_min(0)]]
+        valid = w >= 0
+        values = window[w.clamp_min(0)]
         if comp_ids is not None:
             c = comp_ids[rows]
-            masks.append(c >= 0)
-            values.append(compressed[c.clamp_min(0)])
-        valid = torch.cat(masks, dim=1) if len(masks) > 1 else masks[0]
-        v = torch.cat(values, dim=1) if len(values) > 1 else values[0]
-        v = v.float().masked_fill(~valid.unsqueeze(-1), 0.0)
+            # HF appends compressed entries directly after each query's raw
+            # window. A batch can contain different prompt lengths and decodes.
+            # A different 64-key tile boundary changes BF16 probability rounding.
+            stride = w.size(1) + c.size(1)
+            starts = torch.arange(w.size(0), device=w.device)[:, None] * stride + raw_spans[rows]
+            dest = (starts + torch.arange(c.size(1), device=w.device)).flatten()
+            valid = torch.nn.functional.pad(valid, (0, c.size(1)))
+            values = torch.nn.functional.pad(values, (0, 0, 0, c.size(1)))
+            valid.view(-1).index_copy_(0, dest, (c >= 0).flatten())
+            values.view(-1, dim).index_copy_(0, dest, compressed[c.clamp_min(0)].reshape(-1, dim))
+        v = values.float().masked_fill(~valid.unsqueeze(-1), 0.0)
         qq = q[rows].float()
         scores = torch.bmm(qq, v.transpose(1, 2)) * attn.softmax_scale
         scores.masked_fill_(~valid.unsqueeze(1), -torch.inf)
@@ -168,11 +193,8 @@ def paged_attention(attn, x, state, pages, shared, context):
     kv = _rotate(attn.kv_norm(attn.wkv(x)), freq, attn.rope_head_dim)
     act_quant(kv, 32, inplace=True)
     pages.window.index_copy_(0, state.slots[:count], kv)
-    width = min(context, attn.window_size)
-    win_pos = (pos[:, None] - attn.window_size + 1).clamp_min(0) + torch.arange(width, device=x.device)
+    win_ids, raw_spans = _raw_window(state, count, context, attn.window_size)
     active = state.active[:count, None]
-    win_valid = (win_pos <= pos[:, None]) & active
-    win_ids = torch.where(win_valid, state.physical(win_pos.clamp_max(state.history.max_len - 1), slice(0, count)), -1)
     comp_ids = compressed = None
     if attn.compress_ratio:
         ratio = attn.compress_ratio
@@ -188,7 +210,7 @@ def paged_attention(attn, x, state, pages, shared, context):
         last = ((indices.clamp_min(0) + 1) * ratio - 1).clamp_max(state.history.max_len - 1)
         comp_ids = torch.where((indices >= 0) & active, state.physical(last, slice(0, count), ratio), -1)
         compressed = source.compressed
-    out = _sparse(q, pages.window, compressed, win_ids, comp_ids, attn)
+    out = _sparse(q, pages.window, compressed, win_ids, comp_ids, attn, raw_spans)
     _rotate(out, freq, attn.rope_head_dim, True)
     out = out.reshape(count, attn.n_local_groups, -1)
     act_quant(out, 32, inplace=True)

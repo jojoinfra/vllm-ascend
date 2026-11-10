@@ -28,6 +28,7 @@ class PagePlan:
     slots: np.ndarray
     token_pages: np.ndarray
     active: np.ndarray
+    prompt_lengths: np.ndarray
 
 
 class PagedHistory:
@@ -45,7 +46,7 @@ class PagedHistory:
         self.num_slots = block_size * self.num_blocks
         self.tokens = np.full(self.num_slots, -1, dtype=np.int64)
 
-    def plan(self, positions, slots, block_tables, query_ends):
+    def plan(self, positions, slots, block_tables, query_ends, prompt_lengths=None):
         positions = np.asarray(positions, dtype=np.int64).reshape(-1)
         slots = np.asarray(slots, dtype=np.int64).reshape(-1)
         width = positions.size
@@ -57,6 +58,7 @@ class PagedHistory:
         if active.any() and (slots.max() >= self.num_slots or positions.min() < 0 or positions.max() >= self.max_len):
             raise ValueError("Scheduler token address is outside the configured page pool")
         token_pages = np.zeros((width, self.num_pages), dtype=np.int64)
+        token_prompts = np.zeros(width, dtype=np.int64)
         if active.any():
             ends = np.asarray(query_ends, dtype=np.int64).reshape(-1)
             tables = np.asarray(block_tables, dtype=np.int64)
@@ -72,6 +74,11 @@ class PagedHistory:
             if (np.diff(ends) < 0).any() or (ends < 0).any() or ends.size > len(tables):
                 raise ValueError("Invalid scheduler query offsets")
             rows = np.searchsorted(ends, np.flatnonzero(active), side="right")
+            if prompt_lengths is not None:
+                prompts = np.asarray(prompt_lengths, dtype=np.int64).reshape(-1)
+                if prompts.size <= rows.max() or (prompts < 0).any():
+                    raise ValueError("Incomplete scheduler prompt lengths")
+                token_prompts[active] = prompts[rows]
             lengths = positions[active] // self.block_size + 1
             if lengths.max() > tables.shape[1]:
                 raise ValueError("Scheduler page table does not cover the live context")
@@ -85,7 +92,7 @@ class PagedHistory:
             physical += positions[active] % self.block_size
             if not np.array_equal(physical, slots[active]) or np.unique(physical).size != physical.size:
                 raise ValueError("Block table, positions and scheduler slots disagree")
-        return PagePlan(positions, slots, token_pages, active)
+        return PagePlan(positions, slots, token_pages, active, token_prompts)
 
     def from_context(self, ctx, key, positions):
         width = positions.numel()
@@ -109,7 +116,10 @@ class PagedHistory:
         tables = _field(data, "block_tables", "block_table", "block_table_tensor")
         if ends is None or tables is None:
             raise RuntimeError(f"Missing logical query boundaries or physical block table on {type(data).__name__}")
-        return self.plan(_numpy(positions), slots, _numpy(tables), _numpy(ends))
+        prompts = getattr(data, "v41_prompt_lengths", None)
+        if prompts is None:
+            raise RuntimeError("Active V4.1 attention rows require scheduler prompt lengths")
+        return self.plan(_numpy(positions), slots, _numpy(tables), _numpy(ends), prompts)
 
     def hash_ids(self, reference, plan, input_ids):
         """Use exactly HF's compressed IDs, int64 products, XOR, primes and per-head offsets."""
@@ -144,6 +154,8 @@ class DecodeInputs:
         self.max_tokens = max_tokens
         self.device = device
         self.pos = torch.zeros(max_tokens, dtype=torch.long, device=device)
+        self.prompt_lengths = torch.zeros_like(self.pos)
+        self.raw_span_hint = 0
         self.active = torch.zeros(max_tokens, dtype=torch.bool, device=device)
         self.slots = torch.zeros(max_tokens, dtype=torch.long, device=device)
         self.pages = torch.zeros((max_tokens, history.num_pages), dtype=torch.long, device=device)
@@ -168,9 +180,15 @@ class DecodeInputs:
         if not 0 < width <= self.max_tokens:
             raise ValueError("Scheduled width exceeds the static input allocation")
         live = np.flatnonzero(plan.active)
+        prompts = plan.prompt_lengths[live]
+        if len(live) and (plan.positions[live] >= prompts).any():
+            self.raw_span_hint = None
+        else:
+            self.raw_span_hint = int(prompts.max(initial=0))
         slots = np.where(plan.active, plan.slots, self.history.num_slots + np.arange(width))
         for target, source in (
             (self.pos, plan.positions),
+            (self.prompt_lengths, plan.prompt_lengths),
             (self.active, plan.active),
             (self.slots, slots),
             (self.pages, plan.token_pages),
