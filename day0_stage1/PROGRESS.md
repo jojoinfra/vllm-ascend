@@ -51,3 +51,4 @@
 | 2026-11-10 | 零预热正式评测已越过半程，客户端实测峰值并发 32。已回传的请求均为 HTTP 200，已发出的题目均只有一次请求。官方逐题评分在推理结束后核对。 | [HTTP 核验](../day0_stage2/validator/observe_gsm8k.py) · [官方评分核验](../day0_stage2/validator/summarize_gsm8k.py) |
 | 2026-11-10 | 分页注意力现在按每个请求的实际 prompt 长度排列 raw window 与压缩键，续解时按 HF 顺序遍历环形缓存。针对已观察到的短 eager 与 FULL 图窗口差异做了 CPU 干预，同一前缀的第一个压缩注意力层出现了差异，在该步对齐键的排列后各观测点相同。混批、短前缀和环回的 CPU 回归覆盖了新布局，八卡复验继续。 | [窗口实现](../vllm_ascend/models/deepseek_v41/graph_ops.py) · [混批检查](../tests/ut/models/test_deepseek_v41_window_layout.py) |
 | 2026-11-10 | 修正路由权重的候选已完成正式 GSM8K。全套冻结题目各发送一次，HTTP 全部成功，实测并发达到冻结配置。每份原始回答与官方逐题标记、总评分均已核对归档。后续窗口布局改动使用独立的候选和结果目录。 | [评分与完整性核验](../day0_stage2/validator/summarize_gsm8k.py) |
+| 2026-11-10 | 分页注意力探针按每个请求的完整 prompt 建立参考，随后逐 token 执行，覆盖混批、拒绝回滚与页复用。修正参考后，指定镜像 CPU 的五种调度中有三种各出现一处 top-k 差异，三次固定形状回放中两次也出现数值差异，已保留逐层记录供定位。 | [可重放探针](../day0_stage2/validator/verify_paged_attention.py) |
