@@ -64,3 +64,16 @@ def test_layout_mismatch_rejected(override):
     hardware = dict(physical_devices=[1, 2, 3, 4], tensor_parallel_size=4, expert_parallel_size=4)
     with pytest.raises(RuntimeError, match="Scenario requires"):
         benchmark_module().validate_parallel_layout(settings, hardware)
+
+
+def test_declared_autoregressive_variant_rejects_speculation_and_wrong_buckets():
+    module = benchmark_module()
+    scenario = dict(runtime_variant=dict(speculation="disabled", capture_sizes=[4, 8, 16]))
+    settings = {"--speculative-config": "null", "--compilation-config": '{"cudagraph_capture_sizes":[4,8,16]}'}
+    module.validate_runtime_variant(settings, scenario)
+    with pytest.raises(RuntimeError, match="speculative decoding"):
+        module.validate_runtime_variant(settings | {"--speculative-config": '{"method":"dspark"}'}, scenario)
+    with pytest.raises(RuntimeError, match="Graph buckets"):
+        module.validate_runtime_variant(
+            settings | {"--compilation-config": '{"cudagraph_capture_sizes":[24,48]}'}, scenario
+        )

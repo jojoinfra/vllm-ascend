@@ -76,6 +76,16 @@ def validate_parallel_layout(settings, hardware):
         raise RuntimeError(f"Scenario requires TP{expected_tp}/DP{expected_dp}/EP{expected_ep} on its reserved cards")
 
 
+def validate_runtime_variant(settings, scenario):
+    variant = scenario.get("runtime_variant", {})
+    if variant.get("speculation") == "disabled":
+        if json.loads(settings.get("--speculative-config", "null")) is not None:
+            raise RuntimeError("Scenario requires speculative decoding to be disabled")
+        compilation = json.loads(settings.get("--compilation-config", "{}"))
+        if compilation.get("cudagraph_capture_sizes") != variant["capture_sizes"]:
+            raise RuntimeError("Graph buckets differ from the declared runtime variant")
+
+
 def runtime_metadata(container, scenario):
     info = json.loads(subprocess.check_output(["docker", "inspect", container], text=True))[0]
     devices = {item["PathOnHost"] for item in info["HostConfig"]["Devices"]}
@@ -108,6 +118,7 @@ def runtime_metadata(container, scenario):
     settings["--enable-expert-parallel"] = "--enable-expert-parallel" in command
     settings["--enforce-eager"] = "--enforce-eager" in command
     validate_parallel_layout(settings, scenario["hardware"])
+    validate_runtime_variant(settings, scenario)
     return {
         "container": container,
         "image_id": info["Image"],

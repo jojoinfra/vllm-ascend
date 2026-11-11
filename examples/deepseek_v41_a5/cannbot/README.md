@@ -181,3 +181,30 @@ unsupported-input fallbacks and graph replay through the model-facing API.
 The image also replaces Engram's unsupported tensor shift with exact INT32
 multiplication, avoiding a CPU fallback when staging embedding rows; all 256
 E8M0 scale encodings were checked on NPU.
+
+The index v2 image (HC/cache/FP8/vector index plus Engram shift removal)
+measured **106.09, 101.06, 106.36 output tokens/s**, mean **104.50**, with
+GSM8K first8 8/8 and image checks passing. This is an observed **1.387x**
+versus the initial mean, and about 4% beyond FP8 v2; the contributions of the
+two added changes are not separately measured.
+
+`--decode-mode autoregressive` disables DSpark and selects graph buckets
+`[4,8]` for TP4. Use a separate scenario declaring
+`runtime_variant: {speculation: disabled, capture_sizes: [4,8]}` and retain
+all original input/output and quality requirements. The benchmark rejects
+mismatching final runtime flags. The original workload's measured draft-token
+acceptance was about 18%; this experiment tests whether speculative overhead
+outweighs that acceptance.
+
+The first autoregressive launch used an unsupported 16-row capture bucket;
+it failed the existing model guard (maximum eight one-token requests). Its
+failed result is retained. The corrected variant uses buckets `[4,8]`.
+
+The corrected autoregressive variant measured **121.64, 123.51, 123.39 output
+tokens/s**, mean **122.84**: an observed **1.631x** versus the initial branch,
+and **1.176x** versus the same image with DSpark. GSM8K first8 and the image
+check passed. Inputs, outputs, checkpoint and physical cards remain identical;
+the decoding policy and capture buckets change explicitly. These sequential
+shared-host rounds do not establish an alternating A/B result. The 10x target
+remains unmet. See `index-autoreg-v2-rounds/`,
+`index-autoreg-v2-comparison.json` and `index-autoreg-v2-quality.json`.

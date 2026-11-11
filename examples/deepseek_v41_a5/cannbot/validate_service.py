@@ -5,11 +5,12 @@
 import argparse
 import hashlib
 import json
-import re
 import time
 import urllib.request
 import uuid
 from pathlib import Path
+
+import regex as re
 
 
 def post(base_url, body):

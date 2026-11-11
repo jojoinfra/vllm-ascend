@@ -23,6 +23,7 @@ def main():
     parser.add_argument("--name", required=True)
     parser.add_argument("--port", type=int, default=8010)
     parser.add_argument("--deployment", type=Path, required=True)
+    parser.add_argument("--decode-mode", choices=("dspark", "autoregressive"), default="dspark")
     parser.add_argument("--parallel-layout", choices=("tp4", "dp4"), default="tp4")
     parser.add_argument("--enable-hc", action="store_true")
     parser.add_argument("--enable-cache", action="store_true")
@@ -123,6 +124,14 @@ def main():
             "4",
             "--compilation-config",
             json.dumps(dict(mode=0, cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[6, 12, 24, 48])),
+        ]
+    if args.decode_mode == "autoregressive":
+        buckets = [4, 8] if args.parallel_layout == "tp4" else [1, 2, 4, 8]
+        command += [
+            "--speculative-config",
+            "null",
+            "--compilation-config",
+            json.dumps(dict(mode=0, cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=buckets)),
         ]
     if args.enable_hc or args.enable_cache or args.enable_fp8 or args.enable_index or args.parallel_layout == "dp4":
         additional = dict(
