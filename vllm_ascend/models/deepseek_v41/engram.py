@@ -517,7 +517,10 @@ def decode_int8_e8m0_rows(
     ):
         raise ValueError("Invalid INT8 or FP8/E8M0 row layout")
     raw = scales.to(torch.int32)
-    bits = torch.bitwise_left_shift(raw, FP32_EXPONENT_SHIFT)
+    # UINT8 exponents shifted by 23 fit in INT32 exactly. Multiplication
+    # stays on NPU; tensor left-shift otherwise falls back to the host for
+    # every Engram row lookup staged before a decode graph replay.
+    bits = raw * (1 << FP32_EXPONENT_SHIFT)
     bits = bits.masked_fill(raw == 0, FP32_E8M0_ZERO_BITS)
     bits = bits.masked_fill(raw == 255, FP32_QUIET_NAN_BITS)
     decoded = bits.view(torch.float32)

@@ -474,3 +474,23 @@ def test_sequence_sharded_gate_reduces_table_rows_to_their_token_owner(table_che
             result = part(padded[begin : begin + 2], ids, sequence_parallel=True)
         torch.testing.assert_close(result, expected[begin : begin + 2])
         assert calls == [(4 if decode else 3, 32)]
+
+
+@pytest.mark.parametrize("device", ["cpu", "npu"])
+def test_all_e8m0_encodings_without_tensor_shift(monkeypatch, device):
+    if device == "npu":
+        pytest.importorskip("torch_npu")
+        if not torch.npu.is_available():
+            pytest.skip("Requires Ascend NPU")
+    exponents = torch.arange(256, dtype=torch.uint8).reshape(256, 1)
+    weights = torch.ones(256, 32, dtype=torch.int8)
+    raw = exponents.to(torch.int32)
+    bits = (raw << 23).masked_fill(raw == 0, 0x00400000).masked_fill(raw == 255, 0x7FC00000)
+    expected = bits.view(torch.float32).expand(-1, 32)
+
+    def reject_shift(*args, **kwargs):
+        raise AssertionError("Engram decoding must not invoke unsupported tensor shift")
+
+    monkeypatch.setattr(torch, "bitwise_left_shift", reject_shift)
+    actual = decode_int8_e8m0_rows(weights.to(device), exponents.to(device), output_dtype=torch.float32).cpu()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0, equal_nan=True)

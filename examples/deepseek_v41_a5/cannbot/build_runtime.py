@@ -20,11 +20,13 @@ BASE_RUNTIME_FILES = (
     "vllm_ascend/models/deepseek_v41/model.py",
     "vllm_ascend/models/deepseek_v41/dspark.py",
     "vllm_ascend/models/deepseek_v41/attention.py",
+    "vllm_ascend/models/deepseek_v41/engram.py",
 )
 RUNTIME_FILES = BASE_RUNTIME_FILES + (
     "vllm_ascend/models/deepseek_v41/cannbot_hc.py",
     "vllm_ascend/models/deepseek_v41/cannbot_cache.py",
     "vllm_ascend/models/deepseek_v41/cannbot_quant.py",
+    "vllm_ascend/models/deepseek_v41/cannbot_index.py",
 )
 
 

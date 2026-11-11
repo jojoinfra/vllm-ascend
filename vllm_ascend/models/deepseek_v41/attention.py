@@ -607,6 +607,16 @@ class DeepseekV41Attention(nn.Module):
             source_ratio=self.ratio if self.owns_kv else 0,
             token_history=layer_id == 0,
         )
+        self.index_backend = None
+        additional = getattr(vllm_config, "additional_config", None) or {}
+        if validate_additional_config_bool(additional.get("v41_cannbot_index", False), "v41_cannbot_index"):
+            if self.owns_index and self.ratio and config.index_head_dim == 128:
+                from .cannbot_index import PagedIndexBackend
+
+                stride = 1 << (self.dim + config.index_head_dim - 1).bit_length()
+                self.index_backend = PagedIndexBackend(
+                    stride, self.dim, self.index_heads, self.cache.block_size, self.ratio
+                )
         self.register_buffer(
             "frequencies", rotary_frequencies(config, self.ratio > 0).to(self.attn_sink.device), persistent=False
         )
@@ -767,14 +777,29 @@ class DeepseekV41Attention(nn.Module):
         self.rotate(q.unsqueeze(0), pos)
         q = fp4_quant_dequant(q, 32, scale_format="e8m0")
         weights = indexer.weights_proj(x)[0] * (self.config.index_head_dim**-0.5 * self.config.index_n_heads**-0.5)
-        parts = []
-        for tile in ends.split(_DECODE_INDEX_TILE_KEYS, dim=-1):
-            keys = runtime.source_cache.decode_read(
-                runtime.source_decode, tile, 1, self.dim, self.config.index_head_dim
+        scores = None
+        if self.index_backend is not None:
+            storage, offset = runtime.source_cache.field_storage(1, self.dim, self.config.index_head_dim)
+            source_md = runtime.source_decode
+            scores = self.index_backend(
+                storage,
+                q,
+                weights,
+                source_md.block_table_tensor,
+                source_md.seq_lens,
+                source_md.active,
+                offset,
+                capacity,
             )
-            per_head = torch.einsum("bhd,btd->bht", q, keys.to(x.dtype))
-            parts.append((per_head.relu_() * weights.unsqueeze(-1)).sum(1))
-        scores = parts[0] if len(parts) == 1 else torch.cat(parts, dim=-1)
+        if scores is None:
+            parts = []
+            for tile in ends.split(_DECODE_INDEX_TILE_KEYS, dim=-1):
+                keys = runtime.source_cache.decode_read(
+                    runtime.source_decode, tile, 1, self.dim, self.config.index_head_dim
+                )
+                per_head = torch.einsum("bhd,btd->bht", q, keys.to(x.dtype))
+                parts.append((per_head.relu_() * weights.unsqueeze(-1)).sum(1))
+            scores = parts[0] if len(parts) == 1 else torch.cat(parts, dim=-1)
         if self.tp > 1 and not self.dsa_cp:
             scores = tensor_model_parallel_all_reduce(scores)
         lengths = torch.where(md.active, md.seq_lens // self.ratio, 0)[:, None]

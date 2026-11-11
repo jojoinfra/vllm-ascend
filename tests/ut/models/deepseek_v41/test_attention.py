@@ -900,3 +900,37 @@ def test_fp8_backend_falls_back_for_float32(make_layer):
     layer.fp8_backend = unsupported
     x = torch.randn(3, 32, dtype=torch.float32)
     torch.testing.assert_close(layer._quantize_fp8(x), attention.fp8_quant_dequant(x), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_decode_index_backend_preserves_selection_and_source_metadata(make_layer, fallback):
+    layer = make_layer(2)
+    md = multirow_metadata([4, 3, 0], [[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11]]).decode
+    runtime = attention.DeepseekV41Runtime([], decode=md)
+    runtime.source_cache, runtime.source_decode = layer.cache, md
+    for bank in layer.cache.kv_cache:
+        bank.normal_()
+    x = hidden_tokens(3, 157)
+    qr = hidden_tokens(3, 158)
+    pos = (md.seq_lens - 1).clamp_min(0)
+    with torch.no_grad():
+        layer._decode_index(x, qr, pos, md, runtime)
+        expected = runtime.decode_topk.clone()
+        calls = []
+
+        def backend(storage, query, weights, table, lengths, active, offset, capacity):
+            calls.append(capacity)
+            assert table is md.block_table_tensor and lengths is md.seq_lens and active is md.active
+            backing, start = layer.cache.field_storage(1, layer.dim, layer.config.index_head_dim)
+            assert storage.data_ptr() == backing.data_ptr() and offset == start
+            if fallback:
+                return None
+            positions = ((torch.arange(capacity) + 1) * layer.ratio - 1).expand(x.shape[0], -1)
+            keys = layer.cache.decode_read(md, positions, 1, layer.dim, layer.config.index_head_dim)
+            per_head = torch.einsum("bhd,btd->bht", query, keys.to(query.dtype))
+            return (per_head.relu_() * weights.unsqueeze(-1)).sum(1)
+
+        layer.index_backend = backend
+        layer._decode_index(x, qr, pos, md, runtime)
+        torch.testing.assert_close(runtime.decode_topk, expected, rtol=0, atol=0)
+        assert calls == [md.max_model_len // layer.ratio]

@@ -154,3 +154,30 @@ It passed 114 CPU regressions, the FP8 numerical/graph validator, GSM8K first
 alternating A/B confirmation remains outstanding. The 10x target is not met.
 The cache-only TP1/DP4 attempt failed startup with about **−3.4 GiB** available
 KV-cache budget per card; it has no throughput result.
+
+## Experimental paged index scores
+
+`--enable-index` sets `v41_cannbot_index`. The CANNBot vector kernel reads only
+live compressed positions directly from their physical cache pages, preserving
+BF16 rounding after dot products, weighted products and head reduction. The
+original masking, candidate selection, deterministic top-k and TP reduction
+remain in place. Unsupported layouts use the original path. Output rows must
+be aligned to 16 BF16 elements; one core owns each row to avoid concurrent
+sub-cacheline writes. Signed zeros in masked/zero scores are numerically
+interchangeable for the subsequent selection.
+
+This prototype is **not suitable as a general performance default**. At actual
+compression ratios 1 and 2 it passed numerical checks and graph replay through
+65,536 tokens, but its vector dot products regress substantially for long
+contexts. At 256-token contexts the measured index operation improved about
+5–10x; at 65,536 tokens it was about 22–45x slower. These are operator timings,
+not end-to-end results. Keep the option disabled unless explicitly evaluating
+short workloads. A cube-based follow-up is being developed separately.
+
+`validate_index.py` checks page mappings, active masks, changing queries,
+weights and cache contents, full context lengths, and repeated graph execution.
+`validate_index_wrapper.py` checks the prepared backend, metadata conversion,
+unsupported-input fallbacks and graph replay through the model-facing API.
+The image also replaces Engram's unsupported tensor shift with exact INT32
+multiplication, avoiding a CPU fallback when staging embedding rows; all 256
+E8M0 scale encodings were checked on NPU.
