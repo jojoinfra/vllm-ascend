@@ -27,7 +27,12 @@ def main():
     if checksum != (args.scenario_dir / "scenario.sha256").read_text().split()[0]:
         raise ValueError("Frozen scenario checksum mismatch")
     scenario = json.loads(raw)
-    report = dict(status="running", usable_as_unprofiled_performance=False, scenario_sha256=checksum)
+    report = dict(
+        status="running",
+        usable_as_unprofiled_performance=False,
+        scenario_sha256=checksum,
+        profile_scope="Worker steps selected by profiler_config; not necessarily the complete request interval",
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("x") as stream:
         json.dump(report, stream)

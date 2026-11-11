@@ -26,9 +26,13 @@ def main():
     parser.add_argument("--enable-hc", action="store_true")
     parser.add_argument("--enable-cache", action="store_true")
     parser.add_argument("--profile-dir", type=Path, help="New output directory for a separate profiling run")
+    parser.add_argument("--profile-delay-iterations", type=int, default=10)
+    parser.add_argument("--profile-max-iterations", type=int, default=4, help="Use zero to capture until stop_profile")
     args = parser.parse_args()
     if not 1 <= args.port <= 65535:
         raise ValueError("Port must be in 1..65535")
+    if args.profile_delay_iterations < 0 or args.profile_max_iterations < 0:
+        raise ValueError("Profiler iteration controls must be nonnegative")
     if subprocess.run(["docker", "container", "inspect", args.name], capture_output=True).returncode == 0:
         raise ValueError("Container name exists; retain it and use a new stage name")
     live = subprocess.check_output(["docker", "ps", "-q"], text=True).split()
@@ -103,6 +107,8 @@ def main():
                     "profiler": "torch",
                     "torch_profiler_dir": "/profiles",
                     "torch_profiler_with_stack": False,
+                    "delay_iterations": args.profile_delay_iterations,
+                    "max_iterations": args.profile_max_iterations,
                 }
             ),
         ]

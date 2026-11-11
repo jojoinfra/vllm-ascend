@@ -79,7 +79,11 @@ large gathers that deliberately retain the original implementation. These
 operator measurements are not end-to-end performance results.
 
 For a separate profiling service, also supply `--profile-dir` with a new output
-directory. After the service is healthy, `capture_fixed.py --container NAME
+directory. By default sampling starts after ten worker steps and stops after
+the counter exceeds four recorded steps, limiting expensive trace export.
+Override with `--profile-delay-iterations` and `--profile-max-iterations`; a zero
+maximum captures until the stop request. After the service is healthy,
+`capture_fixed.py --container NAME
 --scenario-dir DIRECTORY --output FILE` runs the frozen warmup, starts profiling,
 runs the fixed requests, and stops profiling. Its output explicitly excludes
 profiled throughput from performance claims. Keep the native traces alongside
