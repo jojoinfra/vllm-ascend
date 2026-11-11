@@ -417,9 +417,33 @@ class DeepseekV41RMSNorm(nn.Module):
         super().__init__()
         self.weight = nn.Parameter(torch.empty(dim))
         self.eps = eps
+        self.cannbot_factory = None
+        self.cannbot_backends = {}
 
     def forward(self, x):
+        if (
+            self.cannbot_factory is not None
+            and x.dtype == torch.bfloat16
+            and x.device.type in ("npu", "privateuseone")
+            and self.weight.dtype in (torch.bfloat16, torch.float32)
+        ):
+            dtype = self.weight.dtype
+            if dtype not in self.cannbot_backends:
+                self.cannbot_backends[dtype] = self.cannbot_factory(self.weight.numel(), self.eps, dtype)
+            return self.cannbot_backends[dtype](x, self.weight)
         return rms_norm(x, self.weight, self.eps)
+
+
+def configure_cannbot_norms(module, vllm_config):
+    additional = getattr(vllm_config, "additional_config", None) or {}
+    if not validate_additional_config_bool(additional.get("v41_cannbot_norm", False), "v41_cannbot_norm"):
+        return
+    from .cannbot_norm import MAX_DIMENSION, VECTOR_WIDTH, RMSNorm
+
+    for norm in module.modules():
+        if isinstance(norm, DeepseekV41RMSNorm) and 0 < norm.weight.numel() <= MAX_DIMENSION:
+            if norm.weight.numel() % VECTOR_WIDTH == 0:
+                norm.cannbot_factory = RMSNorm
 
 
 def rotary_frequencies(config, compressed):

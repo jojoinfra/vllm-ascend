@@ -40,6 +40,7 @@ from vllm_ascend.models.deepseek_v41.attention import (
     DeepseekV41RMSNorm,
     DeepseekV41Runtime,
     RequestSpan,
+    configure_cannbot_norms,
 )
 from vllm_ascend.models.deepseek_v41.core import (
     hc_mixes,
@@ -325,6 +326,7 @@ class DeepseekV41ForCausalLM(nn.Module, SupportsMultiModal):
                 )
         self.engram_layer_ids = tuple(config.engram_layer_ids)
         self._weights_loaded = False
+        configure_cannbot_norms(self, vllm_config)
 
     def get_eagle3_default_aux_hidden_state_layers(self) -> tuple[int, ...]:
         # vLLM passes one-based boundaries. DSpark reads the layer input

@@ -19,6 +19,7 @@ def analyze(path):
     cache_read = []
     fp8 = []
     index = []
+    extra_kernels = {key: [] for key in ("fp4_quant", "rms_norm", "index_cube", "index_reduce")}
     devices = set()
     with path.open() as stream:
         for row in csv.DictReader(stream):
@@ -43,6 +44,14 @@ def analyze(path):
                 fp8.append(duration)
             if "pagedindexscores" in row["Name"].lower() or "pagedindexscores" in row["Type"].lower():
                 index.append(duration)
+            for key, name in (
+                ("fp4_quant", "fp4quantdequant"),
+                ("rms_norm", "rmsnormkernel"),
+                ("index_cube", "pagedindexcubekernel"),
+                ("index_reduce", "indexheadreducekernel"),
+            ):
+                if name in row["Name"].lower() or name in row["Type"].lower():
+                    extra_kernels[key].append(duration)
     if not intervals:
         raise ValueError(f"Empty kernel trace: {path}")
     union = []
@@ -75,6 +84,8 @@ def analyze(path):
         fp8_quant_duration_sum_us=sum(fp8),
         index_score_count=len(index),
         index_score_duration_sum_us=sum(index),
+        **{f"{key}_count": len(values) for key, values in extra_kernels.items()},
+        **{f"{key}_duration_sum_us": sum(values) for key, values in extra_kernels.items()},
         top_shape_groups=ranked[:40],
         op_types=sorted(
             [dict(op_type=key, **value) for key, value in by_type.items()],

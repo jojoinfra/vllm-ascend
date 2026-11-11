@@ -264,3 +264,28 @@ The FP4 image measured **148.96, 149.66, 150.93 output tokens/s**, mean
 and the image check passed. The small incremental gain is not established by
 alternating A/B runs; all comparisons remain sequential on a shared host.
 The 10x target remains unmet.
+
+## RMS normalization candidate
+
+`--enable-norm` enables CANNBot BF16 RMS normalization in compatible target and
+DSpark normalization modules. Weight dtype may be BF16 or FP32; unsupported
+devices, input dtypes and widths retain the reference. The option defaults off.
+Reduction order and reciprocal-square-root evaluation can change rounding:
+this candidate is **not bit-exact**. Its declared limit is one BF16 ULP per
+finite output with matching nonfinite classifications.
+
+`norm-npu-v1.json` passed 320 numerical cases and 80 changing-input graph
+replays. Across 9,433,600 finite outputs, 18 differed by one BF16 ULP and the
+rest matched. The 5120-wide, two-row operation measured about 14.7 us for the
+reference and 3.0 us for the candidate. These are isolated operation timings.
+Integration passed 121 CPU regressions and two NPU tests covering noncontiguous
+views, empty inputs, NaN/Inf, changed weights and repeated graph execution.
+Three fixed rounds measured **155.17, 158.30, 157.95 output tokens/s**, mean
+**157.14** (observed **2.086x** initial and **1.049x** FP4 v1). GSM8K first8
+8/8 and the image check passed. This remains a sequential shared-host comparison;
+the 10x target is unmet.
+
+The follow-up constant-input audit from 1e-40 through 1e20 also matched the
+initial NPU path, including the FP32 square-sum overflow at 1e18 and above.
+The four-rank profile confirms 676 RMS, 64 FP4, 320 FP8 and 32 cube index
+launches per rank in its captured window; see `profile-norm-v1-summary.json`.

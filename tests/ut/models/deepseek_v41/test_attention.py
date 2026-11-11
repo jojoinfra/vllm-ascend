@@ -945,6 +945,53 @@ def test_fp4_backend_npu_dispatch(make_layer, tensor_device, group, scale_format
     assert calls == [x.shape]
 
 
+def test_norm_backend_preserves_cpu_fallback(tensor_device):
+    if tensor_device != "cpu":
+        pytest.skip("CPU fallback check")
+    norm = attention.DeepseekV41RMSNorm(128, 1e-20)
+    norm.weight.data.fill_(1)
+
+    def unsupported(*args):
+        raise AssertionError("NPU backend must not receive CPU inputs")
+
+    norm.cannbot_factory = unsupported
+    x = torch.randn(3, 128, dtype=torch.bfloat16)
+    torch.testing.assert_close(norm(x), attention.rms_norm(x, norm.weight, norm.eps), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("weight_dtype", [torch.bfloat16, torch.float32])
+def test_norm_backend_npu_graph_and_edges(tensor_device, weight_dtype):
+    if tensor_device != "npu":
+        pytest.skip("NPU dispatch requires hardware")
+    norm = attention.DeepseekV41RMSNorm(5120, 1e-20)
+    norm.weight = nn.Parameter(torch.randn(5120, dtype=weight_dtype), requires_grad=False)
+    attention.configure_cannbot_norms(norm, SimpleNamespace(additional_config={"v41_cannbot_norm": True}))
+    assert norm.cannbot_factory is not None
+    backing = torch.randn(3, 10240, dtype=torch.bfloat16)
+    x = backing[:, ::2]
+    with torch.inference_mode():
+        assert norm(x[:0]).shape == (0, 5120)
+        norm(x)
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            output = norm(x)
+        for replay in range(4):
+            backing.normal_()
+            norm.weight.normal_()
+            if replay == 0:
+                x[0, 0], x[1, 0] = float("nan"), float("inf")
+                x[2].zero_()
+            graph.replay()
+            expected = attention.rms_norm(x, norm.weight, norm.eps)
+            actual, expected = output.cpu(), expected.cpu()
+            torch.testing.assert_close(actual, expected, rtol=1 / 128, atol=0, equal_nan=True)
+            finite = expected.isfinite()
+            left, right = actual.view(torch.int16).int(), expected.view(torch.int16).int()
+            left, right = torch.where(left < 0, -32768 - left, left), torch.where(right < 0, -32768 - right, right)
+            assert int((left - right).abs()[finite].max()) <= 1
+        assert len(norm.cannbot_backends) == 1
+
+
 @pytest.mark.parametrize("fallback", [False, True])
 def test_decode_index_backend_preserves_selection_and_source_metadata(make_layer, fallback):
     layer = make_layer(2)

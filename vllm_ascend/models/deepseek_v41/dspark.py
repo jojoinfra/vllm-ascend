@@ -23,6 +23,7 @@ from .attention import (
     DeepseekV41Metadata,
     DeepseekV41RMSNorm,
     RequestSpan,
+    configure_cannbot_norms,
     rotary_frequencies,
 )
 from .core import hc_pre, make_identity_pre_mix
@@ -282,6 +283,7 @@ class DeepseekV41DSparkForCausalLM(nn.Module):
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.model_path = Path(vllm_config.model_config.model)
         self.original_fp8 = getattr(vllm_config.model_config, "quantization", None) == "deepseek_v4_fp8"
+        configure_cannbot_norms(self, vllm_config)
 
     def embed_input_ids(self, input_ids):
         return self.mtp[0].embed(input_ids)
