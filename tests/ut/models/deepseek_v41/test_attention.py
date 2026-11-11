@@ -909,6 +909,42 @@ def test_fp8_backend_falls_back_for_float32(make_layer):
     torch.testing.assert_close(layer._quantize_fp8(x), attention.fp8_quant_dequant(x), rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("group,scale_format", [(32, "e8m0"), (16, "e4m3")])
+def test_fp4_backend_falls_back_for_float32(make_layer, group, scale_format):
+    layer = make_layer(ratio=2)
+
+    def unsupported(*args):
+        raise AssertionError("BF16 backend must not receive FP32")
+
+    layer.fp4_backends = {(group, scale_format): unsupported}
+    x = torch.randn(3, 32, dtype=torch.float32)
+    actual = layer._quantize_fp4(x, group, scale_format=scale_format)
+    expected = attention.fp4_quant_dequant(x, group, scale_format=scale_format)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("group,scale_format", [(32, "e8m0"), (16, "e4m3")])
+def test_fp4_backend_npu_dispatch(make_layer, tensor_device, group, scale_format):
+    if tensor_device != "npu":
+        pytest.skip("NPU dispatch requires hardware")
+    from vllm_ascend.models.deepseek_v41.cannbot_fp4 import FP4QuantDequant
+
+    layer = make_layer(ratio=2)
+    kernel = FP4QuantDequant(group, scale_format)
+    calls = []
+
+    def backend(x):
+        calls.append(x.shape)
+        return kernel(x)
+
+    layer.fp4_backends = {(group, scale_format): backend}
+    x = torch.randn(3, 128, dtype=torch.bfloat16)
+    actual = layer._quantize_fp4(x, group, scale_format=scale_format)
+    expected = attention.fp4_quant_dequant(x, group, scale_format=scale_format)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert calls == [x.shape]
+
+
 @pytest.mark.parametrize("fallback", [False, True])
 def test_decode_index_backend_preserves_selection_and_source_metadata(make_layer, fallback):
     layer = make_layer(2)

@@ -115,7 +115,7 @@ class DSparkAttention(DeepseekV41Attention):
         self.groups = config.o_groups // self.tp
         self.dsa_cp = False
         self.attention_kernel = DeepseekV41NativeAttention()
-        self.init_fp8_backend(vllm_config)
+        self.init_quantization_backends(vllm_config)
         self.sequence_group = None
         self.dim = config.head_dim
         self.rope_dim = config.qk_rope_head_dim

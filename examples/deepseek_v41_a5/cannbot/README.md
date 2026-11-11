@@ -239,3 +239,28 @@ The separate autoregressive profile exported all four ranks. Each rank records
 320 FP8 QDQ launches, 32 vector index launches, 320 HC launches, 220 cache
 writes and 24 direct short reads. The profile is not included in throughput
 results. See `profile-index-autoreg-v1-summary.json` for counts and limitations.
+
+## FP4 activation candidate
+
+`--enable-fp4` selects BF16 QDQ for index Q/K (group32/E8M0) and compressed
+KV (group16/E4M3). Other dtypes and formats use the reference. Both scale rules,
+nearest-even E2M1 conversion and BF16 output remain explicit; pairing adjacent
+16-value groups prevents concurrent writes to the same output cache line.
+
+`validate_fp4.py --group 32 --scale-format e8m0 --output FILE` and the
+corresponding `--group 16 --scale-format e4m3` command each passed 57 numerical
+checks and ten changing-input graph replays. Every BF16 encoding is compared
+with the unchanged initial NPU reference. That reference itself differs from
+CPU on 190 E8M0 subnormal outputs, flushing them to signed zero; the fusion
+matches the initial NPU exactly for those inputs. Ordinary amplitudes, mixed
+nonfinite values, strided in-place views and graph updates also retain CPU
+reference checks. No CPU difference occurred for the exhaustive E4M3 case.
+
+The measured index-query QDQ shape `[2,32,128]` improved from about 50 to
+3.6 us (E8M0) and 62 to 4.7 us (E4M3). These are isolated operation timings.
+Model integration passed 120 CPU regressions and two NPU dispatch tests.
+The FP4 image measured **148.96, 149.66, 150.93 output tokens/s**, mean
+**149.85** (observed **1.989x** initial and **1.019x** cube/gather). GSM8K first8
+and the image check passed. The small incremental gain is not established by
+alternating A/B runs; all comparisons remain sequential on a shared host.
+The 10x target remains unmet.

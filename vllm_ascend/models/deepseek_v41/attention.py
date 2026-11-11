@@ -558,7 +558,7 @@ class DeepseekV41Attention(nn.Module):
         self.dim = config.head_dim
         self.rope_dim = config.qk_rope_head_dim
         self.attention_kernel = DeepseekV41NativeAttention()
-        self.init_fp8_backend(vllm_config)
+        self.init_quantization_backends(vllm_config)
         self.owns_kv = layer_id in config.kv_source_layer_ids
         self.owns_index = layer_id in config.index_source_layer_ids
         quant_config = vllm_config.quant_config
@@ -674,9 +674,9 @@ class DeepseekV41Attention(nn.Module):
             latent = compressor.norm(latent)
             keys = self.indexer.k_norm(self.indexer.wk(latent))
             self.rotate(keys.unsqueeze(0), completed + 1 - ratio)
-            keys = fp4_quant_dequant(keys, 32, scale_format="e8m0")
+            keys = self._quantize_fp4(keys, 32, scale_format="e8m0")
             self.rotate(latent.unsqueeze(0), completed + 1 - ratio)
-            latent = fp4_quant_dequant(latent, 16, scale_format="e4m3")
+            latent = self._quantize_fp4(latent, 16, scale_format="e4m3")
             if metadata is not None:
                 slots = self.cache.slots(metadata, request_idx, completed)
                 self.cache.write_slots(slots, latent, 0, dim)
@@ -721,7 +721,7 @@ class DeepseekV41Attention(nn.Module):
             rows = slice(start, start + tile_rows)
             query = q[rows]
             self.rotate(query.unsqueeze(0), positions[rows])
-            query = fp4_quant_dequant(query, 32, scale_format="e8m0")
+            query = self._quantize_fp4(query, 32, scale_format="e8m0")
             per_head = torch.einsum("shd,td->sht", query, shared.index_keys)
             per_head.relu_()
             per_head = per_head.to(torch.promote_types(per_head.dtype, weights.dtype))
@@ -762,8 +762,8 @@ class DeepseekV41Attention(nn.Module):
         keys = self.indexer.k_norm(self.indexer.wk(latent))
         self.rotate(keys.unsqueeze(0), group_start)
         self.rotate(latent.unsqueeze(0), group_start)
-        keys = fp4_quant_dequant(keys, 32, scale_format="e8m0")
-        latent = fp4_quant_dequant(latent, 16, scale_format="e4m3")
+        keys = self._quantize_fp4(keys, 32, scale_format="e8m0")
+        latent = self._quantize_fp4(latent, 16, scale_format="e4m3")
         self.cache.decode_write(md, latent, 0, dim, complete)
         self.cache.decode_write(md, keys, 1, dim, complete)
         runtime.source_cache = self.cache
@@ -783,7 +783,7 @@ class DeepseekV41Attention(nn.Module):
         indexer = self.indexer
         q = indexer.wq_b(qr)[0].view(-1, self.index_heads, self.config.index_head_dim)
         self.rotate(q.unsqueeze(0), pos)
-        q = fp4_quant_dequant(q, 32, scale_format="e8m0")
+        q = self._quantize_fp4(q, 32, scale_format="e8m0")
         weights = indexer.weights_proj(x)[0] * (self.config.index_head_dim**-0.5 * self.config.index_n_heads**-0.5)
         scores = None
         if self.index_backend is not None:
@@ -980,13 +980,27 @@ class DeepseekV41Attention(nn.Module):
             output[rows] = attended
         return self._project_output(output, hidden_states.dtype)
 
-    def init_fp8_backend(self, vllm_config):
+    def init_quantization_backends(self, vllm_config):
         self.fp8_backend = None
+        self.fp4_backends = {}
         additional = getattr(vllm_config, "additional_config", None) or {}
         if validate_additional_config_bool(additional.get("v41_cannbot_fp8", False), "v41_cannbot_fp8"):
             from .cannbot_quant import FP8QuantDequant
 
             self.fp8_backend = FP8QuantDequant()
+        if validate_additional_config_bool(additional.get("v41_cannbot_fp4", False), "v41_cannbot_fp4"):
+            from .cannbot_fp4 import FP4QuantDequant
+
+            self.fp4_backends = {
+                (32, "e8m0"): FP4QuantDequant(32, "e8m0"),
+                (16, "e4m3"): FP4QuantDequant(16, "e4m3"),
+            }
+
+    def _quantize_fp4(self, x, block_size=32, *, scale_format="e8m0"):
+        backend = self.fp4_backends.get((block_size, scale_format))
+        if backend is not None and x.dtype == torch.bfloat16 and x.device.type in ("npu", "privateuseone"):
+            return backend(x)
+        return fp4_quant_dequant(x, block_size, scale_format=scale_format)
 
     def _quantize_fp8(self, x, block_size=32, *, inplace=False):
         if (

@@ -28,6 +28,7 @@ def main():
     parser.add_argument("--enable-hc", action="store_true")
     parser.add_argument("--enable-cache", action="store_true")
     parser.add_argument("--enable-fp8", action="store_true")
+    parser.add_argument("--enable-fp4", action="store_true")
     parser.add_argument("--enable-index", action="store_true")
     parser.add_argument("--profile-dir", type=Path, help="New output directory for a separate profiling run")
     parser.add_argument("--profile-delay-iterations", type=int, default=10)
@@ -133,7 +134,14 @@ def main():
             "--compilation-config",
             json.dumps(dict(mode=0, cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=buckets)),
         ]
-    if args.enable_hc or args.enable_cache or args.enable_fp8 or args.enable_index or args.parallel_layout == "dp4":
+    if (
+        args.enable_hc
+        or args.enable_cache
+        or args.enable_fp8
+        or args.enable_fp4
+        or args.enable_index
+        or args.parallel_layout == "dp4"
+    ):
         additional = dict(
             enable_dsa_cp=args.parallel_layout == "tp4", enable_flashcomm1=False, enable_shared_expert_dp=True
         )
@@ -143,6 +151,8 @@ def main():
             additional["v41_cannbot_cache"] = True
         if args.enable_fp8:
             additional["v41_cannbot_fp8"] = True
+        if args.enable_fp4:
+            additional["v41_cannbot_fp4"] = True
         if args.enable_index:
             additional["v41_cannbot_index"] = True
         command += [
