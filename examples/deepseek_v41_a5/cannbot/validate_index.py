@@ -35,20 +35,21 @@ def compare(actual, expected):
         raise AssertionError(f"Index score bit mismatch: count={int(mismatch.sum())}, examples={examples}")
 
 
-def validate(report):
+def validate(report, backend="vector"):
     import torch_npu  # noqa: F401
 
     if torch.npu.device_count() != 1:
         raise RuntimeError("Requires exactly one isolated NPU")
     torch.npu.set_device(0)
     torch.manual_seed(583)
-    module = load_module("cannbot_index")
+    module = load_module("cannbot_index_cube" if backend == "cube" else "cannbot_index")
     qdq = load_module("attention_ops").fp4_quant_dequant
     report.update(numerical=[], graph_replay=[], microbenchmark=[])
     with torch.inference_mode():
-        for heads, ratio in ((8, 2), (32, 2), (32, 1), (32, 128)):
+        cases = ((8, 2), (32, 2), (32, 1)) if backend == "cube" else ((8, 2), (32, 2), (32, 1), (32, 128))
+        for heads, ratio in cases:
             kernel = module.PagedIndexScores(1024, 512, heads, ratio=ratio).compile()
-            for rows, capacity in ((1, 8), (3, 128), (12, 65536 // ratio)):
+            for rows, capacity in ((1, 64 if backend == "cube" else 8), (3, 128), (12, 65536 // ratio)):
                 backing = qdq(torch.randn(2048, 1024, dtype=torch.bfloat16, device="npu"))
                 query = qdq(torch.randn(rows, heads, 128, dtype=torch.bfloat16, device="npu"))
                 weights = torch.randn(rows, heads, dtype=torch.bfloat16, device="npu")
@@ -101,8 +102,10 @@ def validate(report):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--backend", choices=("vector", "cube"), default="vector")
     args = parser.parse_args()
-    source = Path(__file__).resolve().parents[3] / "vllm_ascend/models/deepseek_v41/cannbot_index.py"
+    filename = "cannbot_index_cube.py" if args.backend == "cube" else "cannbot_index.py"
+    source = Path(__file__).resolve().parents[3] / "vllm_ascend/models/deepseek_v41" / filename
     report = dict(
         status="running",
         source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
@@ -111,7 +114,7 @@ def main():
     with args.output.open("x") as stream:
         json.dump(report, stream)
     try:
-        validate(report)
+        validate(report, args.backend)
         report["status"] = "passed"
     except Exception as error:
         report.update(status="failed", error=str(error))

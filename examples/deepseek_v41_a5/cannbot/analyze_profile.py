@@ -17,6 +17,8 @@ def analyze(path):
     hc = []
     cache_write = []
     cache_read = []
+    fp8 = []
+    index = []
     devices = set()
     with path.open() as stream:
         for row in csv.DictReader(stream):
@@ -37,6 +39,10 @@ def analyze(path):
                 cache_write.append(duration)
             if "cachefieldread" in row["Name"].lower() or "cachefieldread" in row["Type"].lower():
                 cache_read.append(duration)
+            if "fp8quantdequant" in row["Name"].lower() or "fp8quantdequant" in row["Type"].lower():
+                fp8.append(duration)
+            if "pagedindexscores" in row["Name"].lower() or "pagedindexscores" in row["Type"].lower():
+                index.append(duration)
     if not intervals:
         raise ValueError(f"Empty kernel trace: {path}")
     union = []
@@ -65,6 +71,10 @@ def analyze(path):
         cache_write_duration_sum_us=sum(cache_write),
         cache_read_count=len(cache_read),
         cache_read_duration_sum_us=sum(cache_read),
+        fp8_quant_count=len(fp8),
+        fp8_quant_duration_sum_us=sum(fp8),
+        index_score_count=len(index),
+        index_score_duration_sum_us=sum(index),
         top_shape_groups=ranked[:40],
         op_types=sorted(
             [dict(op_type=key, **value) for key, value in by_type.items()],

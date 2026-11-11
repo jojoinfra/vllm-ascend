@@ -157,7 +157,7 @@ KV-cache budget per card; it has no throughput result.
 
 ## Experimental paged index scores
 
-`--enable-index` sets `v41_cannbot_index`. The CANNBot vector kernel reads only
+`--enable-index` sets `v41_cannbot_index`. The initial CANNBot vector kernel reads only
 live compressed positions directly from their physical cache pages, preserving
 BF16 rounding after dot products, weighted products and head reduction. The
 original masking, candidate selection, deterministic top-k and TP reduction
@@ -166,13 +166,13 @@ be aligned to 16 BF16 elements; one core owns each row to avoid concurrent
 sub-cacheline writes. Signed zeros in masked/zero scores are numerically
 interchangeable for the subsequent selection.
 
-This prototype is **not suitable as a general performance default**. At actual
+The vector-only v2 image is **not suitable as a general performance default**. At actual
 compression ratios 1 and 2 it passed numerical checks and graph replay through
 65,536 tokens, but its vector dot products regress substantially for long
 contexts. At 256-token contexts the measured index operation improved about
 5–10x; at 65,536 tokens it was about 22–45x slower. These are operator timings,
 not end-to-end results. Keep the option disabled unless explicitly evaluating
-short workloads. A cube-based follow-up is being developed separately.
+short workloads. The cube follow-up below addresses this limitation.
 
 `validate_index.py` checks page mappings, active masks, changing queries,
 weights and cache contents, full context lengths, and repeated graph execution.
@@ -208,3 +208,34 @@ the decoding policy and capture buckets change explicitly. These sequential
 shared-host rounds do not establish an alternating A/B result. The 10x target
 remains unmet. See `index-autoreg-v2-rounds/`,
 `index-autoreg-v2-comparison.json` and `index-autoreg-v2-quality.json`.
+
+## Cube index and gathered-cache follow-up
+
+The experimental backend now selects a cube matrix kernel for block size 128,
+compression ratios 1/2 and 8/32 heads. Its separate reduction keeps BF16
+per-head dots and products. Graph shapes retain their scratch allocations,
+and explicit synchronization protects reused buffers. Capacities not divisible
+by 64 use the original reference path. Other supported layouts retain the
+vector implementation; the option remains disabled by default.
+
+`index-cube-npu-v3.json` records nine numerical cases and 45 changing-input
+replays. At 65,536 tokens, measured cube index times were 241, 345 and 673 us
+for (8 heads, ratio2), (32 heads, ratio2) and (32 heads, ratio1), versus reference
+359, 383 and 629 us. The last case still regresses about 7%; there is no
+universal speedup claim. The model-facing wrapper passed 12 additional replays.
+
+With cache optimization enabled, larger reads gather requested backing rows
+before slicing fields when this moves fewer elements than slicing the entire
+cache. Otherwise they retain the original ordering. The isolated 12-row,
+640-column, 512-wide BF16 read improved from about 150 to 66 us. Large 8192-column
+reads can regress and are excluded by the element-count guard. CPU regression
+covers both BF16 and mixed FP32 cache fields. These are operator measurements;
+the combined candidate measured 143.91, 147.35 and 149.86 output tokens/s,
+mean **147.04** (observed **1.952x** initial, **1.197x** previous autoregressive
+variant). GSM8K first8 8/8 and the image check passed. The shared-host comparison is
+sequential; the 10x target remains unmet.
+
+The separate autoregressive profile exported all four ranks. Each rank records
+320 FP8 QDQ launches, 32 vector index launches, 320 HC launches, 220 cache
+writes and 24 direct short reads. The profile is not included in throughput
+results. See `profile-index-autoreg-v1-summary.json` for counts and limitations.

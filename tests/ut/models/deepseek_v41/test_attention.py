@@ -643,8 +643,11 @@ def test_optional_cache_backend_receives_backing_and_live_mask(make_layer):
     torch.testing.assert_close(paged_cache.bits(cache), before, rtol=0, atol=0)
 
 
-def test_cache_backend_fallback_keeps_original_read(make_layer):
-    cache = make_layer(2).cache
+@pytest.mark.parametrize("ratio", [1, 2])
+@pytest.mark.parametrize("bank,offset_kind", [(0, "raw"), (0, "compressed"), (1, "index")])
+@pytest.mark.parametrize("repeat", [1, 32])
+def test_cache_backend_fallback_keeps_original_read(make_layer, ratio, bank, offset_kind, repeat):
+    cache = make_layer(ratio).cache
     md = attention.DeepseekV41DecodeMetadata(
         torch.tensor([1, 2]),
         torch.tensor([0, 1]),
@@ -653,10 +656,14 @@ def test_cache_backend_fallback_keeps_original_read(make_layer):
         16,
         1,
     )
-    positions = torch.tensor([[0, 1], [-1, 0]])
-    expected = cache.decode_read(md, positions, 0, 0, cache.dim)
+    positions = torch.tensor([[0, 1, 16, -1], [-1, 0, 1, 7]]).repeat(1, repeat)
+    offset = 0 if offset_kind == "raw" else cache.dim
+    width = cache.index_dim if offset_kind == "index" else cache.dim
+    for backing in cache.pages():
+        backing.copy_(torch.randn_like(backing))
+    expected = cache.decode_read(md, positions, bank, offset, width)
     cache.cache_backend = SimpleNamespace(read=lambda *args: None)
-    torch.testing.assert_close(cache.decode_read(md, positions, 0, 0, cache.dim), expected, rtol=0, atol=0)
+    torch.testing.assert_close(cache.decode_read(md, positions, bank, offset, width), expected, rtol=0, atol=0)
 
 
 class CPUSequenceGroup:

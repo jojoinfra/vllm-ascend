@@ -13,15 +13,18 @@ from validate_cache import equal_bits, original_field_write
 from validate_hc import elapsed_us, load_module
 
 
-def original_read(backing, positions, table, lengths, active, offset, width):
+def original_read(backing, positions, table, lengths, active, offset, width, *, gather_first=False):
     pos = positions.clamp(0, 65535)
     blocks = table.gather(1, pos // 128).long()
     slots = blocks * 128 + pos % 128
-    page = backing[:, offset : offset + width]
+    page = backing if gather_first else backing[:, offset : offset + width]
     valid = active[:, None] & (positions >= 0) & (positions < lengths[:, None])
     valid = valid & (slots >= 0) & (slots < page.shape[0])
     safe = torch.where(valid, slots, 0)
-    values = page.index_select(0, safe.flatten()).reshape(*positions.shape, width)
+    values = page.index_select(0, safe.flatten())
+    if gather_first:
+        values = values[:, offset : offset + width]
+    values = values.reshape(*positions.shape, width)
     return torch.where(valid[..., None], values, 0)
 
 
@@ -47,6 +50,7 @@ def main():
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--gather-first", action="store_true")
     args = parser.parse_args()
     if torch.npu.device_count() != 1:
         raise RuntimeError("Graph microbenchmark requires one isolated NPU")
@@ -86,12 +90,15 @@ def main():
                         output = torch.empty((12, columns, width), dtype=dtype, device="npu")
                         reference = partial(original_read, backing, positions, table, lengths, live, offset, width)
                         candidate = partial(candidate_read, reader, backing, positions, table, lengths, active, output)
+                        if args.gather_first:
+                            candidate = partial(reference, gather_first=True)
                         equal_bits(candidate(), reference())
                         row = dict(
                             op="read",
                             dtype=str(dtype),
                             width=width,
                             columns=columns,
+                            gather_first=args.gather_first,
                             reference_us=graph_us(reference),
                             candidate_us=graph_us(candidate),
                         )

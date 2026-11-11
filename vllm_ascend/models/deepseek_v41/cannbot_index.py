@@ -172,7 +172,14 @@ class PagedIndexBackend:
 
     def __init__(self, stride, offset, heads, block_size, ratio):
         self.stride, self.offset, self.heads = stride, offset, heads
-        self.kernel = PagedIndexScores(stride, offset, heads, block_size, ratio).compile()
+        self.alignment = 16
+        kernel_type = PagedIndexScores
+        if ratio in (1, 2) and block_size == 128 and heads in (8, 32):
+            from vllm_ascend.models.deepseek_v41.cannbot_index_cube import PagedIndexScores as CubeIndexScores
+
+            kernel_type = CubeIndexScores
+            self.alignment = 64
+        self.kernel = kernel_type(stride, offset, heads, block_size, ratio).compile()
 
     def __call__(self, backing, query, weights, table, lengths, active, offset, capacity):
         if (
@@ -184,7 +191,7 @@ class PagedIndexBackend:
             or offset != self.offset
             or query.shape[1:] != (self.heads, INDEX_DIM)
             or not backing.is_contiguous()
-            or capacity % 16
+            or capacity % self.alignment
         ):
             return None
         output = query.new_zeros((query.shape[0], capacity))

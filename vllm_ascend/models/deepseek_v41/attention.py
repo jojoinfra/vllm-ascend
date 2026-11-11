@@ -366,11 +366,19 @@ class DeepseekV41Cache(nn.Module, AttentionLayerBase):
         pos = positions.clamp(0, md.max_model_len - 1)
         blocks = md.block_table_tensor.gather(1, pos // self.block_size).long()
         slots = blocks * self.block_size + pos % self.block_size
-        pages = self.field(bank, offset, width)
+        if self.cache_backend is not None:
+            # Gather the requested rows before slicing their fields. Slicing
+            # the complete NPU cache can materialize hundreds of MiB per read.
+            pages, start = self.field_storage(bank, offset, width)
+            if positions.numel() * pages.shape[1] > pages.shape[0] * width:
+                pages, start = self.field(bank, offset, width), 0
+        else:
+            pages, start = self.field(bank, offset, width), 0
         valid = md.active[:, None] & (positions >= 0) & (positions < md.seq_lens[:, None])
         valid = valid & (slots >= 0) & (slots < pages.shape[0])
         safe = torch.where(valid, slots, 0)
         values = pages.index_select(0, safe.flatten())
+        values = values[:, start : start + width]
         values = values.reshape(*positions.shape, width)
         return torch.where(valid[..., None], values, 0)
 
