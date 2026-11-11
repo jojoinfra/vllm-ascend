@@ -5,6 +5,70 @@ The goal is at least 10x end-to-end throughput with 1–4 NPUs and the original
 FP8/FP4 checkpoint. The current experiment reserves physical NPU **1, 2, 3, 4**.
 Do not use physical 0, 5, 6, 7; another experiment owns those cards.
 
+## Measured result and scope
+
+The additional **16-concurrent-request scenario exceeds 10x**: three initial
+rounds average **16.52 output tokens/s**, and three optimized rounds average
+**277.04 output tokens/s**, an observed **16.77x** improvement. The original
+eight-request scenario remains below the target. These are complete batch
+measurements, including prefill, on the same TP4/EP4 cards and FP8/FP4 weights,
+with approximately 100 input tokens and exactly 256 output tokens per request.
+
+| Workload and candidate configuration | Initial mean tokens/s | Candidate mean tokens/s | Observed ratio |
+| --- | ---: | ---: | ---: |
+| c16, graph16 v1, captures `[4,8,16]` | 16.52 | 277.04 | 16.77x |
+| c8, same graph16 v1 image and configuration | 75.33 | 167.94 | 2.23x |
+| c8, earlier cache-slots v3, captures `[4,8]` | 75.33 | 175.50 | 2.33x |
+
+The c16 baseline rounds are 16.03, 16.84 and 16.70 tokens/s; the candidate
+rounds are 276.00, 276.08 and 279.05. Both initial and candidate services passed
+16 simultaneous text checks (two copies of the same first eight GSM8K problems)
+and the frozen image check. This is bounded integration coverage, not a full
+accuracy evaluation. All throughput rounds require zero cached prompt tokens.
+
+The improvement combines CANNBot kernels, direct cache access, disabling DSpark
+speculation and extending ordinary decode graph coverage to 16 requests. The
+initial service already permits 16 sequences, but its largest graph covers only
+eight speculative requests; larger batches fall back to eager execution. The
+candidate log confirms actual 16-active-row replay on all four workers, with
+at least 512 replays recorded per worker. The result is not a claim that any
+single CANNBot kernel provides 16.77x end-to-end speedup.
+
+Evidence is retained under `/home/jojo/dsv41-cannbot-10x-20261111/`:
+`baseline-c16-rounds-v1/`, `graph16-v1-rounds/`, `graph16-v1-c8-rounds/`,
+`baseline-c16-quality-v1.json`, `graph16-v1-quality.json` and
+`graph16-v1-service.log`. A fresh initial-image confirmation after the candidate
+measured **15.97 tokens/s**, giving **17.35x** against the candidate mean.
+Even the slowest candidate round divided by the fastest initial round is
+**16.39x**. `graph16-v1-results.json` audits scenario hashes, unchanged workloads,
+runtime differences, output counts, cache hits, quality and active graph replay.
+These remain bounded shared-host measurements, not a universal performance
+guarantee. The image is
+`jojo/vllm-ascend:dsv41-cannbot10x-graph16-v1`, digest
+`sha256:e2b8af3808106cd45a7d2af0c9994f7cbbfe4504860fb2166046fc57245216d1`;
+`build-graph16-v1/manifest.json` records exact runtime source hashes.
+
+To reproduce the optimized configuration with the pinned local image and
+deployment, choose a new container name while the reserved cards are free:
+
+```bash
+python3 examples/deepseek_v41_a5/cannbot/start_runtime.py \
+  --image jojo/vllm-ascend:dsv41-cannbot10x-graph16-v1 \
+  --name jojo-cannbot10x-graph16-reproduce-npu1-4 \
+  --deployment /home/jojo/dsv41-cannbot-10x-20261111/deployment \
+  --decode-mode autoregressive --autoregressive-max-requests 16 \
+  --enable-hc --enable-cache --enable-cache-slots \
+  --enable-fp8 --enable-fp4 --enable-index \
+  --enable-norm --enable-rope --enable-residual
+
+python3 examples/deepseek_v41_a5/cannbot/run_fixed.py \
+  --container jojo-cannbot10x-graph16-reproduce-npu1-4 \
+  --scenario-dir /home/jojo/dsv41-cannbot-10x-20261111/scenario-npu1-4-c16-autoregressive-v3 \
+  --output-dir /path/to/new-results-directory
+```
+
+## Optimization history
+
 The first candidate replaces HC4 gates and the 20-step Sinkhorn normalization
 with a CANNBotDSL kernel. The projection and all model equations remain in
 the initial implementation. `v41_cannbot_hc` defaults to false; setting it to
@@ -32,15 +96,16 @@ required; inactive rows perform no writes, including aliases of slot zero.
    including multiple iteration counts, epsilon values, saturation, empty and
    non-multiple token counts. A compile-only pass is not numerical validation.
 3. Run the initial image and candidate serially on the same four physical cards.
-   Preserve fixed prompts, tokenization hashes, eight concurrent requests,
+   Preserve each frozen scenario's prompts, tokenization hashes, concurrency,
    256 output tokens per request, warmup, sampling and zero-cache-hit checks.
 4. Keep every raw round and report aggregate repeated results, TTFT and latency.
    Profile separately; exclude profiled rounds from the performance comparison.
 5. Check API, text and image correctness. Audit runtime source hashes and verify
    the CANNBot kernel executes before attributing any performance change to it.
 
-No 10x performance result has been established. Operator microbenchmarks are
-not end-to-end results. Historical data in `../fixed-throughput/` remains
+The original c8 scenario has not reached 10x; the additional c16 result and its
+scope are reported above. Operator microbenchmarks are not end-to-end results.
+Historical data in `../fixed-throughput/` remains
 unchanged. The NPU1–4 experiment uses a separate scenario directory with the
 same requests and a fresh initial-image baseline; pass it with `--scenario-dir`
 to `../benchmark-fixed.py`.
@@ -399,7 +464,9 @@ requests. Only the ordinary one-token decode graph limit is expanded; DSpark
 retains its eight-request bound. This experiment requires a newly built image
 containing the expanded limit. The change passed 125 related CPU regressions,
 including sixteen-row Engram staging, reordered live rows and inactive rows.
-End-to-end validation is pending.
+One additional focused test covers all sixteen live histories, request
+reordering and page boundaries; the twelve focused graph/staging tests passed.
+Full-service c16/c8 throughput and concurrent quality results are reported above.
 
 For quality checks at the expanded batch size, `validate_service.py
 --concurrency 16` submits two copies of each original first-eight GSM8K sample
