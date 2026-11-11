@@ -606,6 +606,59 @@ def test_cache_spec_accounts_for_mixed_precision_source(make_layer):
     assert layer.cache.field(1, layer.dim, layer.config.index_head_dim).dtype == torch.bfloat16
 
 
+def test_optional_cache_backend_receives_backing_and_live_mask(make_layer):
+    cache = make_layer(2).cache
+    assert cache.cache_backend is None
+    slots = torch.tensor([0, -1, 7], dtype=torch.int64)
+    active = torch.tensor([True, True, False])
+    md = attention.DeepseekV41DecodeMetadata(
+        torch.tensor([1, 2, 3]), slots, torch.zeros(3, 4, dtype=torch.int32), active, 16, 1
+    )
+    values = torch.ones(3, cache.dim)
+    positions = torch.zeros(3, 2, dtype=torch.int64)
+    expected = torch.full((3, 2, cache.dim), 17.0)
+
+    class Backend:
+        def write(self, storage, supplied, mapped_slots, enabled, offset):
+            assert storage.shape == (48, 2 * cache.dim)
+            assert storage.dtype == torch.float32
+            assert offset == 0
+            assert supplied is values
+            assert mapped_slots is slots
+            torch.testing.assert_close(enabled, torch.tensor([True, False, False]))
+            return True
+
+        def read(self, storage, supplied, table, lengths, live, offset, width):
+            assert storage.shape == (48, 2 * cache.dim)
+            assert storage.dtype == torch.float32
+            assert offset == cache.dim and width == cache.dim
+            assert supplied is positions and table is md.block_table_tensor
+            assert lengths is md.seq_lens and live is md.active
+            return expected
+
+    cache.cache_backend = Backend()
+    before = paged_cache.snapshot(cache)
+    cache.decode_write(md, values, 0, cache.dim, torch.tensor([True, False, True]))
+    assert cache.decode_read(md, positions, 1, 0, cache.dim) is expected
+    torch.testing.assert_close(paged_cache.bits(cache), before, rtol=0, atol=0)
+
+
+def test_cache_backend_fallback_keeps_original_read(make_layer):
+    cache = make_layer(2).cache
+    md = attention.DeepseekV41DecodeMetadata(
+        torch.tensor([1, 2]),
+        torch.tensor([0, 1]),
+        torch.zeros(2, 4, dtype=torch.int32),
+        torch.tensor([True, False]),
+        16,
+        1,
+    )
+    positions = torch.tensor([[0, 1], [-1, 0]])
+    expected = cache.decode_read(md, positions, 0, 0, cache.dim)
+    cache.cache_backend = SimpleNamespace(read=lambda *args: None)
+    torch.testing.assert_close(cache.decode_read(md, positions, 0, 0, cache.dim), expected, rtol=0, atol=0)
+
+
 class CPUSequenceGroup:
     """Use real Gloo collectives for the tiny TP2 layout comparison."""
 

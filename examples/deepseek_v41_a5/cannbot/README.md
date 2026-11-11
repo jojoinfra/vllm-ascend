@@ -15,6 +15,15 @@ shape compilation in the request path. Checkpoint parameters are passed as
 detached tensor aliases to match DSL 0.6's strict DLPack provider type. The
 kernel does not transfer tensor values to the host.
 
+The next candidate adds `v41_cannbot_cache`, also false by default. It writes
+live decode rows directly into the cache's backing storage and reads compressor
+groups of up to eight positions. This avoids materializing a full cache field
+for each small update. Large window/index gathers and scalar token history use
+the original implementation. Field kernels compile during model construction;
+device metadata loads bypass the scalar cache so graph replays see new slots,
+lengths and live masks. The existing invariant of unique live write slots is
+required; inactive rows perform no writes, including aliases of slot zero.
+
 ## Validation gates
 
 1. Run the core/model/DSpark CPU regression tests.
@@ -62,6 +71,12 @@ refuses any card overlap with a running container. Supply `--image`, `--name`
 and `--deployment` containing the unchanged initial `serve.sh` and fixed
 `reference/chat_template.jinja`. Add `--enable-hc` only after numerical checks.
 The default local service port is 8010. It never stops or replaces containers.
+Add `--enable-cache` to select the direct cache access candidate. Its
+`validate_cache.py --output FILE` checks complete backing-storage bits and
+changing metadata during graph replay on one isolated NPU. The separate
+`benchmark_cache.py --output FILE` compares graph replay costs, including the
+large gathers that deliberately retain the original implementation. These
+operator measurements are not end-to-end performance results.
 
 For a separate profiling service, also supply `--profile-dir` with a new output
 directory. After the service is healthy, `capture_fixed.py --container NAME
@@ -70,6 +85,11 @@ runs the fixed requests, and stops profiling. Its output explicitly excludes
 profiled throughput from performance claims. Keep the native traces alongside
 the capture report; a successful HTTP response alone does not establish that
 every rank exported a complete trace.
+Daemon workers can require offline parsing with
+`torch_npu.profiler.profiler.analyse`. Keep original data if export is incomplete.
+`analyze_profile.py --profile-dir DIRECTORY --output FILE` requires all four
+`kernel_details.csv` exports and reports per-rank duration sums and unions;
+these cannot be added into end-to-end latency.
 
 ## First measured candidate
 

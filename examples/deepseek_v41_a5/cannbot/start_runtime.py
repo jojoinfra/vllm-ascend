@@ -24,6 +24,7 @@ def main():
     parser.add_argument("--port", type=int, default=8010)
     parser.add_argument("--deployment", type=Path, required=True)
     parser.add_argument("--enable-hc", action="store_true")
+    parser.add_argument("--enable-cache", action="store_true")
     parser.add_argument("--profile-dir", type=Path, help="New output directory for a separate profiling run")
     args = parser.parse_args()
     if not 1 <= args.port <= 65535:
@@ -105,17 +106,15 @@ def main():
                 }
             ),
         ]
-    if args.enable_hc:
+    if args.enable_hc or args.enable_cache:
+        additional = dict(enable_dsa_cp=True, enable_flashcomm1=False, enable_shared_expert_dp=True)
+        if args.enable_hc:
+            additional["v41_cannbot_hc"] = True
+        if args.enable_cache:
+            additional["v41_cannbot_cache"] = True
         command += [
             "--additional-config",
-            json.dumps(
-                {
-                    "enable_dsa_cp": True,
-                    "enable_flashcomm1": False,
-                    "enable_shared_expert_dp": True,
-                    "v41_cannbot_hc": True,
-                }
-            ),
+            json.dumps(additional),
         ]
     subprocess.run(command, check=True)
 

@@ -36,6 +36,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
+from vllm_ascend.ascend_config import validate_additional_config_bool
 from vllm_ascend.utils import enable_dsa_cp, enable_sp
 
 from .attention_ops import (
@@ -267,6 +268,20 @@ class DeepseekV41Cache(nn.Module, AttentionLayerBase):
         self.block_size = vllm_config.cache_config.block_size
         self.kv_cache = None
         self.native_layout = None
+        self.cache_backend = None
+        additional = getattr(vllm_config, "additional_config", None) or {}
+        if validate_additional_config_bool(additional.get("v41_cannbot_cache", False), "v41_cannbot_cache"):
+            from .cannbot_cache import CacheFieldBackend
+
+            self.cache_backend = CacheFieldBackend(self.block_size)
+            self.cache_backend.prepare(self.key_width, self.dim, 0, torch.bfloat16)
+            if source_ratio > 1:
+                self.cache_backend.prepare(self.key_width, self.index_dim, self.dim, torch.bfloat16)
+                self.cache_backend.prepare(self.value_width // 2, self.dim, 0, torch.float32)
+                self.cache_backend.prepare(self.value_width // 2, self.dim, self.dim, torch.float32)
+            elif source_ratio == 1:
+                self.cache_backend.prepare(self.value_width, self.dim, 0, torch.bfloat16)
+                self.cache_backend.prepare(self.value_width, self.index_dim, self.dim, torch.bfloat16)
         context = vllm_config.compilation_config.static_forward_context
         if prefix in context:
             raise ValueError(f"Duplicate cache layer {prefix}")
@@ -298,22 +313,27 @@ class DeepseekV41Cache(nn.Module, AttentionLayerBase):
 
     def field(self, bank, offset, width):
         """Address a logical state field within the physical pages for this layer."""
+        storage, start = self.field_storage(bank, offset, width)
+        return storage[:, start : start + width]
+
+    def field_storage(self, bank, offset, width):
+        """Return the backing storage and element offset without a full-cache slice."""
         key, value = self.pages()
         if bank == 0 and 0 <= offset < self.dim and offset + width <= self.dim:
-            return key[:, offset : offset + width]
+            return key, offset
         if bank == 0 and offset == self.dim and self.source_ratio:
             values = value.view(torch.float32) if self.source_ratio > 1 else value
-            return values[:, :width]
+            return values, 0
         if bank == 1 and offset == 0 and self.source_ratio > 1:
-            return value.view(torch.float32)[:, self.dim : self.dim + width]
+            return value.view(torch.float32), self.dim
         if bank == 1 and offset == self.dim and self.source_ratio:
             keys = key if self.source_ratio > 1 else value
-            return keys[:, self.dim : self.dim + width]
+            return keys, self.dim
         if bank == 1 and offset == self.dim + self.index_dim and width == 1 and self.token_history:
             if self.source_ratio:
                 storage = key if self.source_ratio > 1 else value
-                return storage[:, offset : offset + 2].view(torch.float32)
-            return value[:, :2].view(torch.float32)
+                return storage.view(torch.float32), offset // 2
+            return value.view(torch.float32), 0
         raise ValueError(f"Unallocated V4.1 cache field: bank={bank}, offset={offset}, width={width}")
 
     def slots(self, metadata, request_idx, positions):
@@ -334,6 +354,13 @@ class DeepseekV41Cache(nn.Module, AttentionLayerBase):
 
     def decode_read(self, md, positions, bank, offset, width):
         """Read fixed-shape logical positions, zeroing dead rows and future slots."""
+        if self.cache_backend is not None:
+            storage, start = self.field_storage(bank, offset, width)
+            result = self.cache_backend.read(
+                storage, positions, md.block_table_tensor, md.seq_lens, md.active, start, width
+            )
+            if result is not None:
+                return result
         pos = positions.clamp(0, md.max_model_len - 1)
         blocks = md.block_table_tensor.gather(1, pos // self.block_size).long()
         slots = blocks * self.block_size + pos % self.block_size
@@ -347,6 +374,10 @@ class DeepseekV41Cache(nn.Module, AttentionLayerBase):
 
     def decode_write(self, md, values, bank, offset, enabled):
         """Preserve cache bits for inactive rows, including a live write to slot zero."""
+        if self.cache_backend is not None:
+            storage, start = self.field_storage(bank, offset, values.shape[-1])
+            if self.cache_backend.write(storage, values, md.slot_mapping, enabled & md.active, start):
+                return
         page = self.field(bank, offset, values.shape[-1])
         values = values.to(page.dtype)
         valid = enabled & md.active & (md.slot_mapping >= 0) & (md.slot_mapping < page.shape[0])

@@ -443,6 +443,8 @@ class AscendConfig:
     # Experimental HC4 gates/Sinkhorn fusion using CANNBotDSL 0.6.0 on A5.
     # Default off until NPU numerical, graph and end-to-end validation passes.
     v41_cannbot_hc: bool = False
+    # Direct cache writes and short compressor reads; graph-tested A5 prototype.
+    v41_cannbot_cache: bool = False
     enable_sp_by_pass: bool = False
     enable_sparse_sfa_c8: bool = False
     enable_sparse_li_c8: bool = False

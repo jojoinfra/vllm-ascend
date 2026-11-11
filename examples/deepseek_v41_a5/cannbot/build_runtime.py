@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Build an offline HC candidate from the exact initial A5 runtime, without NPUs."""
+"""Build an offline CANNBot candidate from the exact initial A5 runtime."""
 
 import argparse
 import hashlib
@@ -14,12 +14,16 @@ BASE_IMAGE = "jojo/vllm-ascend:d4ac431-a5-fp8-fp4"
 BASE_IMAGE_ID = "sha256:70586cf570b3780fdb5c3c8a23e5e4c250d397240abf4df79e25f86292ac1e8e"
 WHEEL_NAME = "cannbotdsl-0.6.0+g91e7c8f-cp312-cp312-manylinux_2_28_aarch64.whl"
 WHEEL_SHA256 = "65b0957dd5462ac97e9318c688d95e9e4e71815832ef3b8c73caf0211998c51f"
-RUNTIME_FILES = (
+BASE_RUNTIME_FILES = (
     "vllm_ascend/ascend_config.py",
     "vllm_ascend/models/deepseek_v41/core.py",
     "vllm_ascend/models/deepseek_v41/model.py",
     "vllm_ascend/models/deepseek_v41/dspark.py",
+    "vllm_ascend/models/deepseek_v41/attention.py",
+)
+RUNTIME_FILES = BASE_RUNTIME_FILES + (
     "vllm_ascend/models/deepseek_v41/cannbot_hc.py",
+    "vllm_ascend/models/deepseek_v41/cannbot_cache.py",
 )
 
 
@@ -73,9 +77,9 @@ def main():
         raise ValueError("Candidate image tag already exists; choose a new version")
     parent_hashes = {
         path: digest(subprocess.check_output(["git", "-C", str(repo), "show", f"{BASE_REF}:{path}"]))
-        for path in RUNTIME_FILES[:-1]
+        for path in BASE_RUNTIME_FILES
     }
-    if image_hashes(BASE_IMAGE, RUNTIME_FILES[:-1]) != parent_hashes:
+    if image_hashes(BASE_IMAGE, BASE_RUNTIME_FILES) != parent_hashes:
         raise ValueError("Initial image runtime sources differ from the requested initial branch")
     args.context.mkdir(parents=True, exist_ok=False)
     hashes = {}
@@ -91,7 +95,7 @@ def main():
         f"RUN /opt/d4ac431/.venv/bin/python3 -m pip install --no-index --no-deps /tmp/{WHEEL_NAME} "
         f"&& rm /tmp/{WHEEL_NAME}\n"
         "COPY source/ /opt/d4ac431/vllm-ascend/\n"
-        'LABEL source.stage="cannbot-hc-experimental"\n'
+        'LABEL source.stage="cannbot-experimental"\n'
     )
     manifest = dict(
         base_ref=BASE_REF,
