@@ -397,4 +397,13 @@ results remain separate.
 selects capture sizes `[4,8,16]` with TP4. The launcher still defaults to eight
 requests. Only the ordinary one-token decode graph limit is expanded; DSpark
 retains its eight-request bound. This experiment requires a newly built image
-containing the expanded limit. End-to-end validation is pending.
+containing the expanded limit. The change passed 125 related CPU regressions,
+including sixteen-row Engram staging, reordered live rows and inactive rows.
+End-to-end validation is pending.
+
+For quality checks at the expanded batch size, `validate_service.py
+--concurrency 16` submits two copies of each original first-eight GSM8K sample
+at once, with independent cache salts, then runs the frozen image request.
+The default remains eight serial text requests. The report records concurrency,
+repetitions, all sixteen answers and their original sample indices. This is
+still an eight-problem regression, not a broader accuracy evaluation.

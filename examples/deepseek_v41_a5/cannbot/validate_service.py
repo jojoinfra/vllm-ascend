@@ -3,8 +3,10 @@
 """Bounded GSM8K and image regression after unprofiled throughput measurements."""
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
+import threading
 import time
 import urllib.request
 import uuid
@@ -27,19 +29,25 @@ def main():
     parser.add_argument("--base-url", default="http://127.0.0.1:8010")
     parser.add_argument("--reference", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--concurrency", type=int, choices=(1, 8, 16), default=1)
     args = parser.parse_args()
     dataset = (args.reference / "gsm8k-test.jsonl").read_bytes()
     report = dict(
         status="running",
         dataset_sha256=hashlib.sha256(dataset).hexdigest(),
         results=[],
-        scope="First eight GSM8K samples and frozen image; bounded integration regression only",
+        scope="First eight GSM8K samples repeated for concurrency, and frozen image; bounded regression only",
+        concurrency=args.concurrency,
+        repetitions=max(1, args.concurrency // 8),
     )
     with args.output.open("x") as stream:
         json.dump(report, stream)
+    samples = [json.loads(line) for line in dataset.splitlines()[:8]]
+    barrier = threading.Barrier(args.concurrency)
     try:
-        for index, line in enumerate(dataset.splitlines()[:8]):
-            sample = json.loads(line)
+
+        def check(index):
+            sample = samples[index % 8]
             body = dict(
                 model="deepseek-v4.1",
                 temperature=0,
@@ -55,6 +63,7 @@ def main():
                     )
                 ],
             )
+            barrier.wait()
             started = time.monotonic()
             response = post(args.base_url, body)
             answer = response["choices"][0]["message"]["content"]
@@ -63,6 +72,7 @@ def main():
             predicted = extracted[-1].replace(",", "") if extracted else None
             row = dict(
                 index=index,
+                sample_index=index % 8,
                 request=body,
                 response=response,
                 expected=expected,
@@ -70,15 +80,24 @@ def main():
                 passed=predicted == expected,
                 seconds=time.monotonic() - started,
             )
-            report["results"].append(row)
-            args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
-            print(json.dumps(dict(index=index, passed=row["passed"], predicted=predicted)), flush=True)
+            return row
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+            pending = [pool.submit(check, index) for index in range(8 * report["repetitions"])]
+            for future in concurrent.futures.as_completed(pending):
+                row = future.result()
+                report["results"].append(row)
+                args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+                print(
+                    json.dumps(dict(index=row["index"], passed=row["passed"], predicted=row["predicted"])), flush=True
+                )
+        report["results"].sort(key=lambda row: row["index"])
         image_request = json.loads((args.reference / "vision-request.json").read_text())
         image_request["cache_salt"] = uuid.uuid4().hex
         response = post(args.base_url, image_request)
         answer = response["choices"][0]["message"]["content"].strip()
         report["vision"] = dict(response=response, expected="5", passed=answer == "5")
-        report["gsm8k_first8_score"] = sum(x["passed"] for x in report["results"]) / 8
+        report["gsm8k_first8_score"] = sum(x["passed"] for x in report["results"]) / len(report["results"])
         report["status"] = "passed" if report["vision"]["passed"] and report["gsm8k_first8_score"] == 1 else "failed"
         if report["status"] != "passed":
             raise AssertionError("Bounded service regression failed")
