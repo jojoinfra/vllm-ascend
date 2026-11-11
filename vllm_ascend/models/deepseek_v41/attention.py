@@ -581,6 +581,7 @@ class DeepseekV41Attention(nn.Module):
         self.tp = tp
         self.dim = config.head_dim
         self.rope_dim = config.qk_rope_head_dim
+        self.init_rotary_backend(vllm_config)
         self.attention_kernel = DeepseekV41NativeAttention()
         self.init_quantization_backends(vllm_config)
         self.owns_kv = layer_id in config.kv_source_layer_ids
@@ -660,8 +661,34 @@ class DeepseekV41Attention(nn.Module):
 
     def rotate(self, x, positions, inverse=False):
         phases = positions.float().unsqueeze(-1) * self.frequencies
-        apply_rotary_emb_real(x[..., -self.rope_dim :], phases.cos(), phases.sin(), inverse=inverse)
+        cosine, sine = phases.cos(), phases.sin()
+        heads = x.shape[2] if x.ndim == 4 else 1
+        if (
+            self.rope_factory is not None
+            and self.rope_dim == 64
+            and x.ndim in (3, 4)
+            and x.shape[0] == 1
+            and x.shape[1] <= 48
+            and (x.shape[-1], heads) in ((128, 1), (128, 8), (128, 32), (512, 1), (512, 16), (512, 64))
+            and x.is_contiguous()
+            and x.dtype == torch.bfloat16
+            and x.device.type in ("npu", "privateuseone")
+        ):
+            key = (x.shape[-1], heads, inverse)
+            if key not in self.rope_backends:
+                self.rope_backends[key] = self.rope_factory(*key)
+            return self.rope_backends[key](x, cosine, sine)
+        apply_rotary_emb_real(x[..., -self.rope_dim :], cosine, sine, inverse=inverse)
         return x
+
+    def init_rotary_backend(self, vllm_config):
+        self.rope_factory = None
+        self.rope_backends = {}
+        additional = getattr(vllm_config, "additional_config", None) or {}
+        if validate_additional_config_bool(additional.get("v41_cannbot_rope", False), "v41_cannbot_rope"):
+            from .cannbot_rope import RotaryApply
+
+            self.rope_factory = RotaryApply
 
     def _compressed(self, x, positions, metadata, request_idx, request, shared):
         if not self.owns_kv:

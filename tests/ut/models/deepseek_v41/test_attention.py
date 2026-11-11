@@ -945,6 +945,73 @@ def test_fp4_backend_npu_dispatch(make_layer, tensor_device, group, scale_format
     assert calls == [x.shape]
 
 
+def test_rope_backend_preserves_cpu_fallback(make_layer, tensor_device):
+    if tensor_device != "cpu":
+        pytest.skip("CPU fallback check")
+    layer = make_layer()
+    layer.rope_dim = 64
+    layer.frequencies = torch.randn(32)
+
+    def unsupported(*args):
+        raise AssertionError("NPU backend must not receive CPU inputs")
+
+    layer.rope_factory = unsupported
+    x = torch.randn(1, 2, 64, 512, dtype=torch.bfloat16)
+    positions = torch.tensor([10, 1000])
+    phases = positions.float().unsqueeze(-1) * layer.frequencies
+    expected = x.clone()
+    attention.apply_rotary_emb_real(expected[..., -64:], phases.cos(), phases.sin())
+    assert layer.rotate(x, positions) is x
+    torch.testing.assert_close(x, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("inverse", [False, True])
+@pytest.mark.parametrize("shape", [(1, 2, 128), (1, 2, 64, 512)])
+def test_rope_backend_npu_graph_and_fallback(make_layer, tensor_device, inverse, shape):
+    if tensor_device != "npu":
+        pytest.skip("NPU dispatch requires hardware")
+    layer = make_layer()
+    layer.rope_dim = 64
+    layer.frequencies = torch.randn(32)
+    layer.init_rotary_backend(SimpleNamespace(additional_config={"v41_cannbot_rope": True}))
+    x = torch.randn(*shape, dtype=torch.bfloat16)
+    positions = torch.tensor([1, 100])
+    with torch.inference_mode():
+        layer.rotate(x, positions, inverse)
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            layer.rotate(x, positions, inverse)
+        for replay in range(4):
+            x.normal_()
+            positions.add_(37)
+            phases = positions.float().unsqueeze(-1) * layer.frequencies
+            expected = x.clone()
+            attention.apply_rotary_emb_real(expected[..., -64:], phases.cos(), phases.sin(), inverse)
+            graph.replay()
+            torch.testing.assert_close(x, expected, rtol=0, atol=0)
+        assert len(layer.rope_backends) == 1
+        # Exercise unsupported sequence length, strides, dtype and head count.
+        samples = [
+            torch.randn(1, 49, 128, dtype=torch.bfloat16),
+            torch.randn(1, 2, 256, dtype=torch.bfloat16)[..., ::2],
+            torch.randn(1, 2, 128, dtype=torch.float32),
+            torch.randn(1, 2, 3, 128, dtype=torch.bfloat16),
+        ]
+
+        def unsupported(*args):
+            raise AssertionError("Unsupported input reached the RoPE backend")
+
+        layer.rope_factory = unsupported
+        layer.rope_backends = {}
+        for sample in samples:
+            positions = torch.arange(sample.shape[1])
+            phases = positions.float().unsqueeze(-1) * layer.frequencies
+            expected = sample.clone()
+            attention.apply_rotary_emb_real(expected[..., -64:], phases.cos(), phases.sin(), inverse)
+            assert layer.rotate(sample, positions, inverse) is sample
+            torch.testing.assert_close(sample, expected, rtol=0, atol=0)
+
+
 def test_norm_backend_preserves_cpu_fallback(tensor_device):
     if tensor_device != "cpu":
         pytest.skip("CPU fallback check")

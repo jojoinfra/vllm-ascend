@@ -120,6 +120,7 @@ class DSparkAttention(DeepseekV41Attention):
         self.sequence_group = None
         self.dim = config.head_dim
         self.rope_dim = config.qk_rope_head_dim
+        self.init_rotary_backend(vllm_config)
         self.config = config
         quant = vllm_config.quant_config
         args = {"bias": False, "quant_config": quant}

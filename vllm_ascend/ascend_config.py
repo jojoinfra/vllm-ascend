@@ -451,6 +451,8 @@ class AscendConfig:
     v41_cannbot_fp4: bool = False
     # BF16 RMS normalization; opt-in with a one-BF16-ULP numerical bound.
     v41_cannbot_norm: bool = False
+    # Adjacent-pair BF16 RoPE application with unchanged FP32 sin/cos.
+    v41_cannbot_rope: bool = False
     # Device-bounded paged index scores; experimental and opt-in.
     v41_cannbot_index: bool = False
     enable_sp_by_pass: bool = False

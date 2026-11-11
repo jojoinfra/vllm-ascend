@@ -30,6 +30,7 @@ def main():
     parser.add_argument("--enable-fp8", action="store_true")
     parser.add_argument("--enable-fp4", action="store_true")
     parser.add_argument("--enable-norm", action="store_true")
+    parser.add_argument("--enable-rope", action="store_true")
     parser.add_argument("--enable-index", action="store_true")
     parser.add_argument("--profile-dir", type=Path, help="New output directory for a separate profiling run")
     parser.add_argument("--profile-delay-iterations", type=int, default=10)
@@ -141,6 +142,7 @@ def main():
         or args.enable_fp8
         or args.enable_fp4
         or args.enable_norm
+        or args.enable_rope
         or args.enable_index
         or args.parallel_layout == "dp4"
     ):
@@ -157,6 +159,8 @@ def main():
             additional["v41_cannbot_fp4"] = True
         if args.enable_norm:
             additional["v41_cannbot_norm"] = True
+        if args.enable_rope:
+            additional["v41_cannbot_rope"] = True
         if args.enable_index:
             additional["v41_cannbot_index"] = True
         command += [

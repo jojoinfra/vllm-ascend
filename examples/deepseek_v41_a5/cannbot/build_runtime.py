@@ -28,6 +28,7 @@ RUNTIME_FILES = BASE_RUNTIME_FILES + (
     "vllm_ascend/models/deepseek_v41/cannbot_quant.py",
     "vllm_ascend/models/deepseek_v41/cannbot_fp4.py",
     "vllm_ascend/models/deepseek_v41/cannbot_norm.py",
+    "vllm_ascend/models/deepseek_v41/cannbot_rope.py",
     "vllm_ascend/models/deepseek_v41/cannbot_index.py",
     "vllm_ascend/models/deepseek_v41/cannbot_index_cube.py",
 )

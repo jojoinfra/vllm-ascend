@@ -289,3 +289,21 @@ The follow-up constant-input audit from 1e-40 through 1e20 also matched the
 initial NPU path, including the FP32 square-sum overflow at 1e18 and above.
 The four-rank profile confirms 676 RMS, 64 FP4, 320 FP8 and 32 cube index
 launches per rank in its captured window; see `profile-norm-v1-summary.json`.
+
+## Rotary application candidate
+
+`--enable-rope` fuses the adjacent-pair BF16 rotation arithmetic while retaining
+the original FP32 phase, sine and cosine operations. It supports contiguous
+single-batch inputs with a 64-wide rotary tail, pitch128 with 1/8/32 heads or
+pitch512 with 1/16/64 heads, and at most 48 tokens. Other layouts and dtypes use
+the reference. Both target and DSpark attention initialize this default-off
+backend; each instance caches kernels by pitch, head count and direction.
+
+`validate_rope.py` passed 61 numerical cases and 80 changing-input graph replays,
+checking exact finite output bits and nonfinite classifications against the
+initial NPU operation. This includes all BF16 encodings and unchanged prefix
+elements. Two-token operation timings improved from about 15-23 us to 3.4 us.
+The 128-token, 64-head case had little gain, so integration conservatively
+retains the reference above 48 tokens. These are isolated operation timings.
+Integration passed 122 CPU regressions and four NPU tests covering forward and
+inverse graph replays, rank3/rank4 dispatch and unsupported-input fallbacks.
