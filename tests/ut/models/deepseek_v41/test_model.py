@@ -589,6 +589,37 @@ def test_graph_reports_live_rows_without_engram(staged_hash_model):
     torch.testing.assert_close(paged_cache.bits(cache), before)
 
 
+def test_sixteen_live_requests_restore_independent_history_across_pages(staged_hash_model):
+    model = staged_hash_model
+    cache = model.layers[0].attn.cache
+    paged_cache.allocate(cache, 32, 2)
+    tables = [[request, 31 - request] for request in range(16)]
+    histories = [[request] for request in range(16)]
+    hash_batch(model, torch.arange(16), [RequestSpan(i, i + 1, 1) for i in range(16)], tables)
+    addresses = {}
+    for position in range(1, 4):
+        order = list(reversed(range(16))) if position % 2 else list(range(16))
+        table = torch.tensor([tables[request] for request in order], dtype=torch.int32)
+        tokens = torch.tensor([(request + position) % 20 for request in order])
+        positions = torch.full((16,), position)
+        slots = table[:, position // 2].long() * 2 + position % 2
+        decode = DeepseekV41DecodeMetadata(positions + 1, slots, table, torch.ones(16, dtype=torch.bool), 4)
+        cache.metadata = lambda: DeepseekV41Metadata([], table, slots, 16, decode)
+        expected_cache = paged_cache.snapshot(cache)
+        assert model.prepare_decode_graph_inputs(tokens, positions) == 16
+        for row, request in enumerate(order):
+            histories[request].append(int(tokens[row]))
+            expected = model.engram_hasher.hash_tokens(
+                histories[request], model.engram_hasher.new_state(), start_position=0
+            )[-1]
+            expected_cache[1].view(torch.float32).reshape(-1)[slots[row]] = tokens[row]
+            for layer in model.engram_layer_ids:
+                actual = model._decode_engram_values[16, layer]
+                torch.testing.assert_close(actual[row], expected[layer])
+                assert addresses.setdefault(layer, actual.data_ptr()) == actual.data_ptr()
+        torch.testing.assert_close(paged_cache.bits(cache), expected_cache)
+
+
 def test_sequence_parallel_hc_keeps_local_rows_and_gathers_only_unpadded_tokens(paged_hash_model, monkeypatch):
     model = paged_hash_model
     model.sequence_parallel = True
