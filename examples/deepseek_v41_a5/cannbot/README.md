@@ -376,3 +376,25 @@ length dtypes with 72 replays; 13 focused CPU regressions also passed. The
 int64-length metadata operation measured about 26.6 to 3.3 us for a 512-block
 table. Image v3 adds a once-per-process admission log showing actual dtypes;
 the v2 build without that diagnostic was not served.
+
+Image v3 admitted the fusion on all four workers with int64 positions and
+lengths, 512 table columns and maximum length65536. Three fixed c8 rounds
+measured **175.07, 176.89, 174.55 output tokens/s**, mean **175.50**, or
+**2.330x** the initial branch and **1.039x** HC residual v1. GSM8K first8
+8/8 and the image check passed. These remain sequential shared-host results
+with the explicitly declared autoregressive policy; the 10x target is unmet.
+
+## Sixteen-request graph experiment
+
+The initial deployment permits 16 sequences, but its graph capture sizes cover
+only eight speculative requests. A separate c16 workload repeats each original
+c8 prompt twice with unique request IDs and cache salts. It retains the same
+prompt/output lengths, weights, hardware and maximum sequences. Measure the
+unchanged initial image on this scenario before comparing a candidate; c8
+results remain separate.
+
+`--decode-mode autoregressive --autoregressive-max-requests 16` explicitly
+selects capture sizes `[4,8,16]` with TP4. The launcher still defaults to eight
+requests. Only the ordinary one-token decode graph limit is expanded; DSpark
+retains its eight-request bound. This experiment requires a newly built image
+containing the expanded limit. End-to-end validation is pending.

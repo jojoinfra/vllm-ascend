@@ -471,7 +471,7 @@ def staged_hash_model(paged_hash_model):
     model.layers.append(IdleRecordingBlock(cache))
     for layer in model.layers:
         layer.engram = Rows()
-    model._decode_capture_sizes = frozenset({1, 2, 4, 8})
+    model._decode_capture_sizes = frozenset({1, 2, 4, 8, 16})
     model._decode_engram_values = {}
     return model
 
@@ -505,13 +505,13 @@ def test_graph_engram_refreshes_paged_history_and_preserves_idle_cache(staged_ha
     torch.testing.assert_close(paged_cache.bits(cache), before)
 
 
-@pytest.mark.parametrize("sizes", [[1], [1, 2, 4, 8], list(range(1, 9)), [3, 7]])
+@pytest.mark.parametrize("sizes", [[1], [1, 2, 4, 8], list(range(1, 17)), [3, 7], [4, 8, 16]])
 def test_decode_capture_accepts_configured_subsets(sizes):
     config = SimpleNamespace(cudagraph_mode=model_module.CUDAGraphMode.FULL_DECODE_ONLY, cudagraph_capture_sizes=sizes)
     assert model_module._decode_capture_sizes(config) == frozenset(sizes)
 
 
-@pytest.mark.parametrize("sizes", [[], [0], [1, 9], [1, 1], [True]])
+@pytest.mark.parametrize("sizes", [[], [0], [1, 17], [1, 1], [True]])
 def test_decode_capture_rejects_unsupported_buckets(sizes):
     config = SimpleNamespace(cudagraph_mode=model_module.CUDAGraphMode.FULL_DECODE_ONLY, cudagraph_capture_sizes=sizes)
     with pytest.raises(ValueError, match="capture sizes"):
@@ -536,6 +536,8 @@ def test_multirow_engram_keeps_per_bucket_storage_and_request_owned_history(stag
         ([0], [10]),
         ([None, 1, None, None, None, None, 2, None], [99, 7, 99, 99, 99, 99, 3, 99]),
         ([None] * 4, [99] * 4),
+        ([None] * 7 + [1] + [None] * 7 + [2], [99] * 7 + [6] + [99] * 7 + [8]),
+        ([None] * 16, [99] * 16),
     ]
     for assignments, tokens in batches:
         bucket = len(assignments)
@@ -613,9 +615,10 @@ def test_dspark_graph_buckets_and_aux_layer_input(paged_hash_model):
         cudagraph_mode=model_module.CUDAGraphMode.FULL_DECODE_ONLY, cudagraph_capture_sizes=[24, 48]
     )
     assert model_module._decode_capture_sizes(config, 6) == {24, 48}
-    config.cudagraph_capture_sizes = [8]
-    with pytest.raises(ValueError, match="width 6"):
-        model_module._decode_capture_sizes(config, 6)
+    for unsupported in ([8], [24, 48, 96]):
+        config.cudagraph_capture_sizes = unsupported
+        with pytest.raises(ValueError, match="width 6"):
+            model_module._decode_capture_sizes(config, 6)
     model = paged_hash_model
     model.config.dspark_target_layer_ids = [0, 1]
     model.set_aux_hidden_state_layers((1, 2))

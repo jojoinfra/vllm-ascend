@@ -62,21 +62,25 @@ from vllm_ascend.models.deepseek_v41.processor import register_vision_processor
 from vllm_ascend.models.deepseek_v41.vision import embed_images, init_vision_modules
 from vllm_ascend.utils import enable_dsa_cp, enable_sp, shared_expert_dp_enabled
 
-MAX_DECODE_GRAPH_ROWS = 8
+MAX_AUTOREGRESSIVE_GRAPH_REQUESTS = 16
+MAX_SPECULATIVE_GRAPH_REQUESTS = 8
 
 
 def _decode_capture_sizes(compilation, query_width=1):
     sizes = tuple(compilation.cudagraph_capture_sizes or ())
+    max_requests = MAX_AUTOREGRESSIVE_GRAPH_REQUESTS if query_width == 1 else MAX_SPECULATIVE_GRAPH_REQUESTS
     if (
         compilation.cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY
         or not sizes
         or any(
-            type(size) is not int or size % query_width or not 1 <= size // query_width <= MAX_DECODE_GRAPH_ROWS
+            type(size) is not int or size % query_width or not 1 <= size // query_width <= max_requests
             for size in sizes
         )
         or len(set(sizes)) != len(sizes)
     ):
-        raise ValueError(f"V4.1 requires FULL_DECODE_ONLY capture sizes for 1–8 requests of width {query_width}")
+        raise ValueError(
+            f"V4.1 requires FULL_DECODE_ONLY capture sizes for 1–{max_requests} requests of width {query_width}"
+        )
     return frozenset(sizes)
 
 

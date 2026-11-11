@@ -25,6 +25,7 @@ def main():
     parser.add_argument("--deployment", type=Path, required=True)
     parser.add_argument("--decode-mode", choices=("dspark", "autoregressive"), default="dspark")
     parser.add_argument("--parallel-layout", choices=("tp4", "dp4"), default="tp4")
+    parser.add_argument("--autoregressive-max-requests", type=int, choices=(8, 16), default=8)
     parser.add_argument("--enable-hc", action="store_true")
     parser.add_argument("--enable-cache", action="store_true")
     parser.add_argument("--enable-cache-slots", action="store_true")
@@ -38,6 +39,10 @@ def main():
     parser.add_argument("--profile-delay-iterations", type=int, default=10)
     parser.add_argument("--profile-max-iterations", type=int, default=4, help="Use zero to capture until stop_profile")
     args = parser.parse_args()
+    if args.autoregressive_max_requests == 16 and (
+        args.decode_mode != "autoregressive" or args.parallel_layout != "tp4"
+    ):
+        raise ValueError("The 16-request graph experiment requires autoregressive decoding with TP4")
     if not 1 <= args.port <= 65535:
         raise ValueError("Port must be in 1..65535")
     if args.profile_delay_iterations < 0 or args.profile_max_iterations < 0:
@@ -132,6 +137,8 @@ def main():
         ]
     if args.decode_mode == "autoregressive":
         buckets = [4, 8] if args.parallel_layout == "tp4" else [1, 2, 4, 8]
+        if args.autoregressive_max_requests == 16:
+            buckets.append(16)
         command += [
             "--speculative-config",
             "null",
