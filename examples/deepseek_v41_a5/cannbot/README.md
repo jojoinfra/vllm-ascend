@@ -307,3 +307,9 @@ The 128-token, 64-head case had little gain, so integration conservatively
 retains the reference above 48 tokens. These are isolated operation timings.
 Integration passed 122 CPU regressions and four NPU tests covering forward and
 inverse graph replays, rank3/rank4 dispatch and unsupported-input fallbacks.
+Three fixed rounds measured **162.47, 164.45, 164.30 output tokens/s**, mean
+**163.74** (observed **2.174x** initial and **1.042x** normalization v1). This
+retains the separately declared autoregressive decoding policy and the frozen
+requests, weights, token counts, physical cards and zero cache-hit checks.
+GSM8K first8 8/8 and the image check passed. The comparison is sequential on a
+shared host; the 10x target remains unmet.
