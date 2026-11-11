@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -50,6 +51,34 @@ def unloaded_module(module_class):
     module = object.__new__(module_class)
     nn.Module.__init__(module)
     return module
+
+
+@pytest.mark.parametrize("additional", [None, {}, {"v41_cannbot_hc": False}, {"v41_cannbot_hc": "false"}])
+def test_hc_backend_disabled_does_not_import_optional_dsl(monkeypatch, additional):
+    monkeypatch.setitem(sys.modules, "vllm_ascend.models.deepseek_v41.cannbot_hc", None)
+    block = unloaded_module(model_module.DeepseekV41Block)
+    block.init_hc_backend(SimpleNamespace(additional_config=additional))
+    assert block.hc_sinkhorn is None
+
+
+def test_hc_backend_rejects_non_hc4_before_importing_dsl(monkeypatch):
+    monkeypatch.setitem(sys.modules, "vllm_ascend.models.deepseek_v41.cannbot_hc", None)
+    block = unloaded_module(model_module.DeepseekV41Block)
+    block.config = SimpleNamespace(hc_mult=2)
+    with pytest.raises(ValueError, match="hc_mult=4"):
+        block.init_hc_backend(SimpleNamespace(additional_config={"v41_cannbot_hc": True}))
+
+
+def test_hc_backend_keeps_checkpoint_iterations_and_epsilon(monkeypatch):
+    class Backend:
+        def __init__(self, iterations, eps):
+            self.iterations, self.eps = iterations, eps
+
+    monkeypatch.setitem(sys.modules, "vllm_ascend.models.deepseek_v41.cannbot_hc", SimpleNamespace(HC4Sinkhorn=Backend))
+    block = unloaded_module(model_module.DeepseekV41Block)
+    block.config = SimpleNamespace(hc_mult=4, hc_sinkhorn_iters=7, hc_eps=3e-5)
+    block.init_hc_backend(SimpleNamespace(additional_config={"v41_cannbot_hc": "true"}))
+    assert (block.hc_sinkhorn.iterations, block.hc_sinkhorn.eps) == (7, 3e-5)
 
 
 @pytest.mark.parametrize(

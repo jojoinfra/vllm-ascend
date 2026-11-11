@@ -215,6 +215,7 @@ class DSparkStage(DeepseekV41Block):
         nn.Module.__init__(self)
         self.config = config
         prefix = f"mtp.{stage}"
+        self.init_hc_backend(vllm_config)
         self.attn = DSparkAttention(config, vllm_config, prefix + ".attn")
         expert_config = copy(config)
         expert_config.n_routed_experts = config.dspark_n_routed_experts

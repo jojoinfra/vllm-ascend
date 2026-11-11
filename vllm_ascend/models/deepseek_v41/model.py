@@ -33,6 +33,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.utils import _merge_multimodal_embeddings
 
+from vllm_ascend.ascend_config import validate_additional_config_bool
 from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_shard
 from vllm_ascend.models.deepseek_v41.attention import (
     DeepseekV41Attention,
@@ -98,6 +99,19 @@ class EngramQueryUnrotation(nn.Module):
 
 
 class DeepseekV41Block(nn.Module):
+    def init_hc_backend(self, vllm_config):
+        self.hc_sinkhorn = None
+        additional = getattr(vllm_config, "additional_config", None) or {}
+        enabled = validate_additional_config_bool(additional.get("v41_cannbot_hc", False), "v41_cannbot_hc")
+        if enabled:
+            if self.config.hc_mult != 4:
+                raise ValueError("v41_cannbot_hc requires hc_mult=4")
+            # Optional DSL dependency is loaded only for the explicitly enabled
+            # experiment; each block owns its compilation cache.
+            from vllm_ascend.models.deepseek_v41.cannbot_hc import HC4Sinkhorn
+
+            self.hc_sinkhorn = HC4Sinkhorn(self.config.hc_sinkhorn_iters, self.config.hc_eps)
+
     def __init__(self, config, vllm_config, layer_id):
         super().__init__()
         self.config = config
@@ -112,6 +126,7 @@ class DeepseekV41Block(nn.Module):
         self.attn_norm = DeepseekV41RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.ffn_norm = DeepseekV41RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.engram = None
+        self.init_hc_backend(vllm_config)
         width = (config.hc_mult + 2) * config.hc_mult
         for name in ("attn", "ffn"):
             self.register_parameter(
@@ -130,6 +145,7 @@ class DeepseekV41Block(nn.Module):
             self.config.rms_norm_eps,
             self.config.hc_eps,
             self.config.hc_sinkhorn_iters,
+            sinkhorn=self.hc_sinkhorn,
         )
 
     def forward(self, hidden_states, pre_mix, runtime, decode_mask=None, image_mask=None):

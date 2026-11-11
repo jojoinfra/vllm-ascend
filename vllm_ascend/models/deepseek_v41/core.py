@@ -59,11 +59,15 @@ def hc_mixes(
     norm_eps: float = 1e-20,
     hc_eps: float = 1e-6,
     sinkhorn_iters: int = 20,
+    *,
+    sinkhorn=None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Normalize jointly over all HC copies before projecting their coefficients."""
     states = hidden_states.flatten(-2).float()
     rstd = torch.rsqrt(states.square().mean(-1, keepdim=True) + norm_eps)
     mixes = F.linear(states, fn.float()) * rstd
+    if sinkhorn is not None:
+        return sinkhorn(mixes, scale, base)
     return hc_split_sinkhorn(mixes, scale, base, hidden_states.shape[-2], sinkhorn_iters, hc_eps)
 
 
