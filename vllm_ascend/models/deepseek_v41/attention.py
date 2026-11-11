@@ -402,7 +402,7 @@ class DeepseekV41Cache(nn.Module, AttentionLayerBase):
             or positions.shape[1] % 64
             or positions.dtype != torch.int64
             or md.block_table_tensor.dtype != torch.int32
-            or md.seq_lens.dtype != torch.int32
+            or md.seq_lens.dtype not in (torch.int32, torch.int64)
             or md.active.dtype != torch.bool
             or not 0 < md.block_table_tensor.shape[1] <= 512
             or not 0 < md.max_model_len <= md.block_table_tensor.shape[1] * 128
@@ -414,6 +414,14 @@ class DeepseekV41Cache(nn.Module, AttentionLayerBase):
             if len(self.slot_backends) >= 8:
                 return None
             self.slot_backends[key] = self.slot_factory(*key)
+            logger.info_once(
+                "V4.1 CANNBot read slots: position_dtype=%s length_dtype=%s table_width=%d max_length=%d",
+                positions.dtype,
+                md.seq_lens.dtype,
+                key[0],
+                key[1],
+                scope="process",
+            )
         return self.slot_backends[key](positions, md.block_table_tensor, md.seq_lens, md.active)
 
     def decode_write(self, md, values, bank, offset, enabled):

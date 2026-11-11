@@ -55,12 +55,19 @@ def validate(report):
                             [-(2**63), -1, 0, 127, 128, 2**32, 2**32 + 127, 2**63 - 1], device="npu"
                         )
                         table[0, :2] = torch.tensor([-(2**31), 2**31 - 1], dtype=torch.int32, device="npu")
-                    compare(kernel(positions, table, lengths, active), golden(positions, table, lengths, active))
-                    report["numerical"].append(dict(table_width=table_width, rows=rows, columns=columns))
+                    for length_dtype in (torch.int32, torch.int64):
+                        typed_lengths = lengths.to(length_dtype)
+                        compare(
+                            kernel(positions, table, typed_lengths, active),
+                            golden(positions, table, typed_lengths, active),
+                        )
+                        report["numerical"].append(
+                            dict(table_width=table_width, rows=rows, columns=columns, length_dtype=str(length_dtype))
+                        )
             rows, columns = 2, 640
             positions = torch.randint(0, max_length, (rows, columns), device="npu")
             table = torch.randint(0, (storage_rows + 127) // 128, (rows, table_width), dtype=torch.int32, device="npu")
-            lengths = torch.full((rows,), max_length, dtype=torch.int32, device="npu")
+            lengths = torch.full((rows,), max_length, dtype=torch.int64, device="npu")
             active = torch.ones(rows, dtype=torch.bool, device="npu")
             graph = torch.npu.NPUGraph()
             with torch.npu.graph(graph):
@@ -88,6 +95,12 @@ def validate(report):
             )
             report["microbenchmark"].append(row)
             print(json.dumps(row), flush=True)
+            table.zero_()
+            positions[:, :8] = torch.tensor([-(2**63), -1, 0, 127, 2**31, 2**32, 2**32 + 127, 2**63 - 1], device="npu")
+            for boundary in (-(2**63), -1, 0, 1, 2**31 - 1, 2**31, 2**32, 2**32 + 128, 2**63 - 1):
+                lengths.fill_(boundary)
+                compare(kernel(positions, table, lengths, active), golden(positions, table, lengths, active))
+                report["numerical"].append(dict(table_width=table_width, case="int64_length_boundary", length=boundary))
 
 
 def main():

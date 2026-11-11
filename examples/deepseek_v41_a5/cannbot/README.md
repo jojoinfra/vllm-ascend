@@ -345,13 +345,15 @@ new paths execute. Profile latency is excluded from throughput comparisons.
 
 `--enable-cache-slots` combines read-slot lookup and validity masking for
 128-token pages and position matrices whose column count is a multiple of 64.
-It supports tables up to 512 blocks, nonnegative storage sizes fitting int32,
-int64 positions, int32 page tables/lengths and boolean active flags. Unsupported
+It supports tables up to 512 blocks, positive storage sizes fitting int32,
+int64 positions, int32 page tables, int32/int64 lengths and boolean active flags. Unsupported
 inputs retain the original operations. The option defaults off and leaves the
 cache values and field layouts unchanged.
 
 Both halves of every int64 position participate in validity checks, so large
-or negative positions cannot wrap to valid low 32-bit positions. Page bounds
+or negative positions cannot wrap to valid low 32-bit positions. Both halves of
+int64 lengths are also compared, retaining the original signed comparison and
+position-clamping behavior. Page bounds
 are checked before multiplying physical pages into int32 slots. Each cache
 owns a bounded compilation cache; lengths, page tables and active flags remain
 dynamic graph inputs.
@@ -364,3 +366,13 @@ Integration passed 124 CPU regressions and six NPU cache-read tests with 36
 graph replays across raw, compressed and index fields for compression ratios
 one and two. Both BF16 and FP32 storage and nonaligned fallback are covered.
 These are operation/integration checks; full-model results are recorded separately.
+
+The first full-model image retained the fallback because the real metadata
+builder uses int64 lengths while v1 admitted only int32. Its mean 166.44 tokens/s
+is **not a measurement of this fusion**; `cache-slots-v1-audit.json` retains that
+finding. The corrected kernel passed 98 numerical cases (including int64 length
+boundaries) and 24 graph replays. Twelve NPU field-read tests now cover both
+length dtypes with 72 replays; 13 focused CPU regressions also passed. The
+int64-length metadata operation measured about 26.6 to 3.3 us for a 512-block
+table. Image v3 adds a once-per-process admission log showing actual dtypes;
+the v2 build without that diagnostic was not served.

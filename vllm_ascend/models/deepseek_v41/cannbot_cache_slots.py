@@ -26,6 +26,7 @@ class CacheReadSlotsKernel:
     def __init__(self, table_width: int, max_length: int, storage_rows: int):
         self.table_width, self.max_length, self.storage_rows = table_width, max_length, storage_rows
         self.positions = Buffer(MemLoc.UB, (2 * LANES,), dtypes.int32)
+        self.length = Buffer(MemLoc.UB, (LANES,), dtypes.int32)
         self.table = Buffer(MemLoc.UB, ((table_width + LANES - 1) // LANES * LANES,), dtypes.int32)
         self.slots = Buffer(MemLoc.UB, (LANES,), dtypes.int32)
         self.valid = Buffer(MemLoc.UB, (LANES,), dtypes.uint8)
@@ -34,8 +35,8 @@ class CacheReadSlotsKernel:
         tiles = positions.shape[1] // LANES
         for job in range(get_block_idx(), positions.shape[0] * tiles, get_block_num()):
             row, column = job // tiles, job % tiles
-            length = load_bypass(lengths.ptr(row))
             enabled = load_bypass(active.ptr(row))
+            mem_copy(tile_slice(self.length, (2,), (0,)), lengths[row, None].view(2))
             mem_copy(self.positions, tile_slice(positions, (1, LANES, 2), (row, column, 0)).view(2 * LANES))
             mem_copy(tile_slice(self.table, (self.table_width,), (0,)), table[row, None].view(self.table_width))
             with vf(mode="raw"):
@@ -46,21 +47,27 @@ class CacheReadSlotsKernel:
                 # wrap into apparently valid low 32-bit positions.
                 low, high = rr.vload_deinterleave(self.positions, 0, width="b32")
                 low, high = rr.vreinterpret(low, dtypes.uint32), rr.vreinterpret(high, dtypes.uint32)
-                live = rr.vselect(one, zero, cond_mask=rr.veq(high, zero, mask=full))
-                live = rr.vselect(
-                    live, zero, cond_mask=rr.vlt(low, rr.vdups(length, dtypes.uint32, mask=full), mask=full)
-                )
+                length_words = rr.vload(self.length, 0)
+                length_low = rr.vreinterpret(rr.vgather_reg(length_words, zero), dtypes.uint32)
+                length_high = rr.vgather_reg(length_words, one)
+                signed_high = rr.vreinterpret(high, dtypes.int32)
+                live = rr.vselect(one, zero, cond_mask=rr.vlt(low, length_low, mask=full))
+                live = rr.vselect(live, zero, cond_mask=rr.veq(signed_high, length_high, mask=full))
+                live = rr.vselect(one, live, cond_mask=rr.vlt(signed_high, length_high, mask=full))
                 live = rr.vselect(
                     live,
                     zero,
-                    cond_mask=rr.vgt(
-                        rr.vdups(length, dtypes.int32, mask=full), rr.vdups(0, dtypes.int32, mask=full), mask=full
-                    ),
+                    cond_mask=rr.vge(signed_high, rr.vdups(0, dtypes.int32, mask=full), mask=full),
                 )
                 live = rr.vselect(
                     live, zero, cond_mask=rr.vne(rr.vdups(enabled, dtypes.uint32, mask=full), zero, mask=full)
                 )
                 clamped = rr.vmin(low, rr.vdups(self.max_length - 1, dtypes.uint32, mask=full), mask=full)
+                clamped = rr.vselect(
+                    rr.vdups(self.max_length - 1, dtypes.uint32, mask=full),
+                    clamped,
+                    cond_mask=rr.vne(high, zero, mask=full),
+                )
                 block = rr.vshr(clamped, 7, mask=full)
                 block = rr.vselect(block, zero, cond_mask=rr.vne(live, zero, mask=full))
                 physical = rr.vgather(self.table, block, mask=full)
@@ -112,7 +119,7 @@ class CacheReadSlots:
         return self.run.compile(
             TensorSpec((rows, columns, 2), dtypes.int32),
             TensorSpec((rows, self.table_width), dtypes.int32),
-            TensorSpec((rows,), dtypes.int32),
+            TensorSpec((rows, 2), dtypes.int32),
             TensorSpec((rows,), dtypes.uint8),
             TensorSpec((rows, columns), dtypes.int32),
             TensorSpec((rows, columns), dtypes.uint8),
@@ -127,10 +134,12 @@ class CacheReadSlots:
         if (
             positions.dtype != torch.int64
             or table.dtype != torch.int32
-            or lengths.dtype != torch.int32
+            or lengths.dtype not in (torch.int32, torch.int64)
             or active.dtype != torch.bool
         ):
-            raise ValueError("Cache slots require int64 positions, int32 table/lengths and boolean active flags")
+            raise ValueError(
+                "Cache slots require int64 positions, int32 tables, integer lengths and boolean active flags"
+            )
         if positions.device.type not in ("npu", "privateuseone") or any(
             x.device != positions.device for x in (table, lengths, active)
         ):
@@ -141,7 +150,7 @@ class CacheReadSlots:
             self.compiled()(
                 positions.contiguous().view(torch.int32).view(rows, positions.shape[1], 2),
                 table.contiguous(),
-                lengths.contiguous(),
+                lengths.to(torch.int64).contiguous().view(torch.int32).view(rows, 2),
                 active.contiguous().view(torch.uint8),
                 slots,
                 valid,

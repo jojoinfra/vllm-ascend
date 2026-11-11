@@ -689,7 +689,8 @@ def test_cache_slot_backend_cpu_fallback(make_layer, tensor_device):
 
 @pytest.mark.parametrize("ratio", [1, 2])
 @pytest.mark.parametrize("bank,kind", [(0, "raw"), (0, "compressed"), (1, "index")])
-def test_cache_slot_backend_npu_read_graph(make_layer, tensor_device, ratio, bank, kind):
+@pytest.mark.parametrize("length_dtype", [torch.int32, torch.int64])
+def test_cache_slot_backend_npu_read_graph(make_layer, tensor_device, ratio, bank, kind, length_dtype):
     if tensor_device != "npu":
         pytest.skip("NPU hardware required")
     from vllm_ascend.models.deepseek_v41.cannbot_cache_slots import CacheReadSlots
@@ -698,7 +699,7 @@ def test_cache_slot_backend_npu_read_graph(make_layer, tensor_device, ratio, ban
     cache.block_size = 128
     paged_cache.allocate(cache, 12, 128)
     md = attention.DeepseekV41DecodeMetadata(
-        torch.tensor([180, 250], dtype=torch.int32),
+        torch.tensor([180, 250], dtype=length_dtype),
         torch.tensor([0, 128]),
         torch.tensor([[0, 2, 3, 4], [5, 6, 7, 8]], dtype=torch.int32),
         torch.tensor([True, True]),
