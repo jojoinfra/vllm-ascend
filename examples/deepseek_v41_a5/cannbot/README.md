@@ -332,3 +332,8 @@ the earlier 64-element version regressed for 48/128 rows and is not deployed.
 These are operator measurements. Integration passed 123 CPU regressions and
 one NPU test covering eight graph replays, strided residuals, NaN/Inf and
 dtype/row-count fallbacks. End-to-end measurement is recorded separately.
+Three fixed rounds measured **166.03, 170.11, 170.76 output tokens/s**, mean
+**168.97** (observed **2.243x** initial and **1.032x** RoPE v1). GSM8K first8
+8/8 and the image check passed. The decoding policy and workload remain as
+declared for the previous autoregressive candidate. These sequential runs on
+a shared host do not establish a controlled A/B effect; the 10x target is unmet.
