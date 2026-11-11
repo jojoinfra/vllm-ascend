@@ -25,7 +25,6 @@ from .attention import (
     RequestSpan,
     rotary_frequencies,
 )
-from .attention_ops import fp8_quant_dequant
 from .core import hc_pre, make_identity_pre_mix
 from .engram import IndexedMmapStore
 from .fused_weights import load_indexed_v41_weights
@@ -116,6 +115,7 @@ class DSparkAttention(DeepseekV41Attention):
         self.groups = config.o_groups // self.tp
         self.dsa_cp = False
         self.attention_kernel = DeepseekV41NativeAttention()
+        self.init_fp8_backend(vllm_config)
         self.sequence_group = None
         self.dim = config.head_dim
         self.rope_dim = config.qk_rope_head_dim
@@ -152,7 +152,7 @@ class DSparkAttention(DeepseekV41Attention):
     def project_kv(self, states, positions):
         kv = self.kv_norm(self.wkv(states)[0])
         self.rotate(kv.unsqueeze(0), positions.reshape(-1))
-        return fp8_quant_dequant(kv, 32)
+        return self._quantize_fp8(kv, 32)
 
     def store_context(self, states, positions, slots):
         kv = self.project_kv(states, positions)

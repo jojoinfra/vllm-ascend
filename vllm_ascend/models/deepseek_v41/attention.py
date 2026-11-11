@@ -56,12 +56,14 @@ _OUTPUT_QDQ_TILE_ROWS = 256
 _DECODE_INDEX_TILE_KEYS = 8192
 
 
-def _quantize_projection_input(output):
+def _quantize_projection_input(output, quantizer=None):
     """Consume the attention output; E4M3 quantization groups only its last dimension."""
+    if quantizer is None:
+        quantizer = fp8_quant_dequant
     if output.shape[0] <= _OUTPUT_QDQ_TILE_ROWS:
-        return fp8_quant_dequant(output, 32)
+        return quantizer(output, 32)
     for tile in output.split(_OUTPUT_QDQ_TILE_ROWS):
-        fp8_quant_dequant(tile, 32, inplace=True)
+        quantizer(tile, 32, inplace=True)
     return output
 
 
@@ -548,6 +550,7 @@ class DeepseekV41Attention(nn.Module):
         self.dim = config.head_dim
         self.rope_dim = config.qk_rope_head_dim
         self.attention_kernel = DeepseekV41NativeAttention()
+        self.init_fp8_backend(vllm_config)
         self.owns_kv = layer_id in config.kv_source_layer_ids
         self.owns_index = layer_id in config.index_source_layer_ids
         quant_config = vllm_config.quant_config
@@ -820,7 +823,7 @@ class DeepseekV41Attention(nn.Module):
         raw = self.kv_norm(self.wkv(gathered)[0])
         self.rotate(q.unsqueeze(0), pos)
         self.rotate(raw.unsqueeze(0), full_pos)
-        self.cache.decode_write(full_md, fp8_quant_dequant(raw, 32), 0, 0, full_md.active)
+        self.cache.decode_write(full_md, self._quantize_fp8(raw, 32), 0, 0, full_md.active)
         extra = 0
         if self.ratio:
             self._decode_compressed(gathered, full_pos, full_md, runtime)
@@ -883,7 +886,7 @@ class DeepseekV41Attention(nn.Module):
             positions = torch.arange(request.start_pos, request.seq_len, device=hidden_states.device)
             kv = raw_kv[begin:end]
             self.rotate(kv.unsqueeze(0), positions)
-            kv = fp8_quant_dequant(kv, 32)
+            kv = self._quantize_fp8(kv, 32)
             first = max(0, request.start_pos - self.config.sliding_window + 1)
             if metadata is not None:
                 slots = self.cache.slots(metadata, request_idx, positions)
@@ -944,6 +947,24 @@ class DeepseekV41Attention(nn.Module):
             output[rows] = attended
         return self._project_output(output, hidden_states.dtype)
 
+    def init_fp8_backend(self, vllm_config):
+        self.fp8_backend = None
+        additional = getattr(vllm_config, "additional_config", None) or {}
+        if validate_additional_config_bool(additional.get("v41_cannbot_fp8", False), "v41_cannbot_fp8"):
+            from .cannbot_quant import FP8QuantDequant
+
+            self.fp8_backend = FP8QuantDequant()
+
+    def _quantize_fp8(self, x, block_size=32, *, inplace=False):
+        if (
+            self.fp8_backend is not None
+            and block_size == 32
+            and x.dtype == torch.bfloat16
+            and x.device.type in ("npu", "privateuseone")
+        ):
+            return self.fp8_backend(x, inplace=inplace)
+        return fp8_quant_dequant(x, block_size, inplace=inplace)
+
     def _project_output(self, output, dtype):
         if self.dsa_cp:
             # Exchange local tokens and complete heads for complete tokens and
@@ -953,7 +974,7 @@ class DeepseekV41Attention(nn.Module):
             output = torch.empty_like(send)
             dist.all_to_all_single(output, send, group=self.sequence_group.device_group)
         output = output.view(-1, self.groups, self.local_heads * self.dim // self.groups)
-        output = _quantize_projection_input(output)
+        output = _quantize_projection_input(output, self._quantize_fp8)
         projection = self.wo_a.weight.view(self.groups, self.config.o_lora_rank, -1)
         output = torch.einsum("sgd,grd->sgr", output, projection).flatten(1)
         if self.sequence_group is not None:

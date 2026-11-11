@@ -24,6 +24,7 @@ BASE_RUNTIME_FILES = (
 RUNTIME_FILES = BASE_RUNTIME_FILES + (
     "vllm_ascend/models/deepseek_v41/cannbot_hc.py",
     "vllm_ascend/models/deepseek_v41/cannbot_cache.py",
+    "vllm_ascend/models/deepseek_v41/cannbot_quant.py",
 )
 
 

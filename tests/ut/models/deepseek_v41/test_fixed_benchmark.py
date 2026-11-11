@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Benchmark metadata must describe actual final CLI options and topology."""
+
+import importlib.util
+from pathlib import Path
+
+import pytest
+
+
+def benchmark_module():
+    source = Path(__file__).resolve().parents[4] / "examples/deepseek_v41_a5/benchmark-fixed.py"
+    spec = importlib.util.spec_from_file_location("fixed_benchmark", source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_final_cli_options_override_earlier_values():
+    module = benchmark_module()
+    settings = module.final_cli_settings(
+        [
+            "serve",
+            "--tensor-parallel-size",
+            "4",
+            "--additional-config",
+            '{"old":true}',
+            "--tensor-parallel-size=1",
+            "--additional-config",
+            '{"new":true}',
+        ],
+        ("--tensor-parallel-size", "--additional-config"),
+    )
+    assert settings == {"--tensor-parallel-size": "1", "--additional-config": '{"new":true}'}
+
+
+@pytest.mark.parametrize("tail", [["--dtype"], ["--dtype", "--other"]])
+def test_missing_cli_value_rejected(tail):
+    with pytest.raises(ValueError, match="Missing value"):
+        benchmark_module().final_cli_settings(tail, ("--dtype",))
+
+
+@pytest.mark.parametrize("tp,dp", [(4, 1), (1, 4)])
+def test_matching_four_card_layout(tp, dp):
+    hardware = dict(physical_devices=[1, 2, 3, 4], tensor_parallel_size=tp, expert_parallel_size=4)
+    settings = {"--tensor-parallel-size": str(tp), "--enable-expert-parallel": True}
+    if dp != 1:
+        hardware["data_parallel_size"] = dp
+        settings["--data-parallel-size"] = str(dp)
+    benchmark_module().validate_parallel_layout(settings, hardware)
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"--tensor-parallel-size": "1"},
+        {"--data-parallel-size": "4"},
+        {"--pipeline-parallel-size": "2"},
+        {"--enable-expert-parallel": False},
+    ],
+)
+def test_layout_mismatch_rejected(override):
+    settings = {"--tensor-parallel-size": "4", "--enable-expert-parallel": True} | override
+    hardware = dict(physical_devices=[1, 2, 3, 4], tensor_parallel_size=4, expert_parallel_size=4)
+    with pytest.raises(RuntimeError, match="Scenario requires"):
+        benchmark_module().validate_parallel_layout(settings, hardware)

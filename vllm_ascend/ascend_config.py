@@ -445,6 +445,8 @@ class AscendConfig:
     v41_cannbot_hc: bool = False
     # Direct cache writes and short compressor reads; graph-tested A5 prototype.
     v41_cannbot_cache: bool = False
+    # BF16 E4M3 activation QDQ fusion; disabled until explicitly selected.
+    v41_cannbot_fp8: bool = False
     enable_sp_by_pass: bool = False
     enable_sparse_sfa_c8: bool = False
     enable_sparse_li_c8: bool = False

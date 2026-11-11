@@ -15,6 +15,8 @@ def analyze(path):
     groups = defaultdict(lambda: dict(count=0, duration_sum_us=0.0, max_us=0.0))
     intervals = []
     hc = []
+    cache_write = []
+    cache_read = []
     devices = set()
     with path.open() as stream:
         for row in csv.DictReader(stream):
@@ -31,6 +33,10 @@ def analyze(path):
             item.setdefault("example_name", row["Name"])
             if "hc4sinkhorn" in row["Name"].lower() or "hc4sinkhorn" in row["Type"].lower():
                 hc.append(duration)
+            if "cachefieldwrite" in row["Name"].lower() or "cachefieldwrite" in row["Type"].lower():
+                cache_write.append(duration)
+            if "cachefieldread" in row["Name"].lower() or "cachefieldread" in row["Type"].lower():
+                cache_read.append(duration)
     if not intervals:
         raise ValueError(f"Empty kernel trace: {path}")
     union = []
@@ -55,6 +61,10 @@ def analyze(path):
         duration_sum_us=sum(row["duration_sum_us"] for row in ranked),
         hc4_sinkhorn_count=len(hc),
         hc4_sinkhorn_duration_sum_us=sum(hc),
+        cache_write_count=len(cache_write),
+        cache_write_duration_sum_us=sum(cache_write),
+        cache_read_count=len(cache_read),
+        cache_read_duration_sum_us=sum(cache_read),
         top_shape_groups=ranked[:40],
         op_types=sorted(
             [dict(op_type=key, **value) for key, value in by_type.items()],

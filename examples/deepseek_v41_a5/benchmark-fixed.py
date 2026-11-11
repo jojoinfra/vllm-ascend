@@ -46,6 +46,36 @@ def require_idle(values):
         raise RuntimeError("Service is busy; run this benchmark when no other requests are active")
 
 
+def final_cli_settings(command, flags):
+    """Record the final option value, as argparse does for launch overrides."""
+    settings = {}
+    for index, token in enumerate(command):
+        flag, separator, value = token.partition("=")
+        if flag in flags:
+            if not separator:
+                if index + 1 >= len(command) or command[index + 1].startswith("--"):
+                    raise ValueError(f"Missing value for {flag}")
+                value = command[index + 1]
+            settings[flag] = value
+    return settings
+
+
+def validate_parallel_layout(settings, hardware):
+    tp = int(settings.get("--tensor-parallel-size", 1))
+    dp = int(settings.get("--data-parallel-size", 1))
+    pp = int(settings.get("--pipeline-parallel-size", 1))
+    expected_tp = hardware["tensor_parallel_size"]
+    expected_dp = hardware.get("data_parallel_size", 1)
+    expected_ep = hardware["expert_parallel_size"]
+    if (
+        (tp, dp, pp) != (expected_tp, expected_dp, 1)
+        or tp * dp != len(hardware["physical_devices"])
+        or tp * dp != expected_ep
+        or not settings["--enable-expert-parallel"]
+    ):
+        raise RuntimeError(f"Scenario requires TP{expected_tp}/DP{expected_dp}/EP{expected_ep} on its reserved cards")
+
+
 def runtime_metadata(container, scenario):
     info = json.loads(subprocess.check_output(["docker", "inspect", container], text=True))[0]
     devices = {item["PathOnHost"] for item in info["HostConfig"]["Devices"]}
@@ -59,6 +89,8 @@ def runtime_metadata(container, scenario):
     command = subprocess.check_output(["docker", "exec", container, "cat", "/proc/1/cmdline"]).decode().split("\0")
     flags = (
         "--tensor-parallel-size",
+        "--data-parallel-size",
+        "--pipeline-parallel-size",
         "--quantization",
         "--dtype",
         "--max-model-len",
@@ -72,11 +104,10 @@ def runtime_metadata(container, scenario):
         "--chat-template",
         "--chat-template-content-format",
     )
-    settings = {flag: command[command.index(flag) + 1] for flag in flags if flag in command}
+    settings = final_cli_settings(command, flags)
     settings["--enable-expert-parallel"] = "--enable-expert-parallel" in command
     settings["--enforce-eager"] = "--enforce-eager" in command
-    if settings.get("--tensor-parallel-size") != "4" or not settings["--enable-expert-parallel"]:
-        raise RuntimeError("The frozen scenario requires TP4/EP4")
+    validate_parallel_layout(settings, scenario["hardware"])
     return {
         "container": container,
         "image_id": info["Image"],

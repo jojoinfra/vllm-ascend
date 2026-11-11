@@ -874,3 +874,29 @@ def test_verify_cache_scatter_keeps_slot_zero_with_padding(make_layer):
     torch.testing.assert_close(cache.pages()[0], expected, rtol=0, atol=0)
     cache.decode_write(md, values * -1, 0, 1, torch.zeros_like(live))
     torch.testing.assert_close(cache.pages()[0], expected, rtol=0, atol=0)
+
+
+def test_projection_qdq_callback_preserves_tiling():
+    calls = []
+    output = torch.randn(257, 64, dtype=torch.bfloat16)
+    golden = attention.fp8_quant_dequant(output)
+
+    def quantize(x, block_size, *, inplace=False):
+        calls.append((x.shape[0], block_size, inplace))
+        return attention.fp8_quant_dequant(x, block_size, inplace=inplace)
+
+    actual = attention._quantize_projection_input(output, quantize)
+    assert actual is output
+    torch.testing.assert_close(actual, golden, rtol=0, atol=0)
+    assert calls == [(256, 32, True), (1, 32, True)]
+
+
+def test_fp8_backend_falls_back_for_float32(make_layer):
+    layer = make_layer(ratio=0)
+
+    def unsupported(*args, **kwargs):
+        raise AssertionError("BF16 backend must not receive FP32")
+
+    layer.fp8_backend = unsupported
+    x = torch.randn(3, 32, dtype=torch.float32)
+    torch.testing.assert_close(layer._quantize_fp8(x), attention.fp8_quant_dequant(x), rtol=0, atol=0)

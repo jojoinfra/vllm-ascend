@@ -110,6 +110,47 @@ Raw rounds and the comparison are retained under `baseline-rounds-v2/`,
 The GSM8K check covers only eight examples, not the full benchmark. The
 candidate remains opt-in while profiling and further optimization continue.
 
+With direct cache access enabled alongside HC, the next three rounds measured
+84.32, 83.67 and 83.96 output tokens/s (mean 83.99). The ratio to the initial
+mean is 1.115; this is an observed sequential comparison, with no alternating
+A/B confirmation on the shared host. All eight GSM8K checks and the image smoke
+test passed. See `cache-v1-rounds/` and `cache-v1-comparison.json`. The cache
+backend also passed 30 bitwise cases, 72 changing-input graph replays and 99 CPU
+regressions. The 10x goal is still unmet.
+
 Local evidence and the separate NPU1–4 scenario are under
 `/home/jojo/dsv41-cannbot-10x-20261111/`. Check current JSON/log results before
 using a candidate; a successful build manifest alone is not an acceptance gate.
+
+## FP8 activation candidate and parallel-layout experiment
+
+`v41_cannbot_fp8` (launcher `--enable-fp8`) selects BF16 activation QDQ
+for target and DSpark attention; other dtypes retain the reference path.
+The kernel preserves 32-value E4M3 groups, the FP32 amax floor, upward E8M0
+scale rounding, ties-to-even conversion, signed zeros and the original
+bit-based NaN scale behavior. `validate_quant.py --output FILE` checks all
+65,536 BF16 encodings, ordinary amplitudes, mixed nonfinite groups, in-place
+views and changing-input graph replay. Initial operator measurements show
+2.4–13x speedups across the measured shapes; this is not a model speedup.
+
+`start_runtime.py --parallel-layout dp4` explicitly changes TP4/DP1/EP4 to
+TP1/DP4/EP4 on the same physical cards. It disables DSA-CP and adds graph
+buckets 6 and 12 for smaller per-replica batches. Use a separate scenario
+with `tensor_parallel_size: 1` and `data_parallel_size: 4`, retaining all
+requests, token hashes, sampling, output lengths, cache checks and checkpoint.
+The default remains the original TP4 layout. Results from this experiment
+must identify the topology change when compared with the initial baseline.
+
+Runtime metadata now records the **last** occurrence of CLI options, matching
+launch overrides. Older retained TP4 result files recorded the first
+`--additional-config`, omitting opt-in flags from that metadata field. Their
+actual startup arguments and device traces independently establish HC/cache
+execution. Keep those original result files; do not rewrite historical data.
+
+The FP8 v2 TP4 integration measured **101.45, 97.73, 102.36 output tokens/s**,
+mean **100.51** versus the initial mean **75.33** (observed **1.334x**).
+It passed 114 CPU regressions, the FP8 numerical/graph validator, GSM8K first
+8/8 and the image smoke check. This is a sequential shared-host comparison;
+alternating A/B confirmation remains outstanding. The 10x target is not met.
+The cache-only TP1/DP4 attempt failed startup with about **−3.4 GiB** available
+KV-cache budget per card; it has no throughput result.
