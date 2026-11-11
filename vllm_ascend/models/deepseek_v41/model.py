@@ -102,6 +102,8 @@ class EngramQueryUnrotation(nn.Module):
 class DeepseekV41Block(nn.Module):
     def init_hc_backend(self, vllm_config):
         self.hc_sinkhorn = None
+        self.hc_pre_backend = None
+        self.hc_post_backend = None
         additional = getattr(vllm_config, "additional_config", None) or {}
         enabled = validate_additional_config_bool(additional.get("v41_cannbot_hc", False), "v41_cannbot_hc")
         if enabled:
@@ -112,6 +114,37 @@ class DeepseekV41Block(nn.Module):
             from vllm_ascend.models.deepseek_v41.cannbot_hc import HC4Sinkhorn
 
             self.hc_sinkhorn = HC4Sinkhorn(self.config.hc_sinkhorn_iters, self.config.hc_eps)
+        if validate_additional_config_bool(additional.get("v41_cannbot_residual", False), "v41_cannbot_residual"):
+            if self.config.hc_mult == 4 and self.config.hidden_size == 5120:
+                from .cannbot_hc_residual import HCPost, HCPre
+
+                self.hc_pre_backend, self.hc_post_backend = HCPre(5120), HCPost(5120)
+
+    def _hc_pre(self, hidden_states, pre_mix):
+        if (
+            self.hc_pre_backend is not None
+            and hidden_states.ndim == 3
+            and hidden_states.shape[0] <= 128
+            and hidden_states.dtype == torch.bfloat16
+            and pre_mix.dtype == torch.float32
+            and hidden_states.device.type in ("npu", "privateuseone")
+        ):
+            return self.hc_pre_backend(hidden_states, pre_mix)
+        return hc_pre(hidden_states, pre_mix)
+
+    def _hc_post(self, sublayer_output, residual, post, comb):
+        if (
+            self.hc_post_backend is not None
+            and residual.ndim == 3
+            and residual.shape[0] <= 128
+            and residual.dtype == torch.bfloat16
+            and sublayer_output.dtype == torch.bfloat16
+            and post.dtype == torch.float32
+            and comb.dtype == torch.float32
+            and residual.device.type in ("npu", "privateuseone")
+        ):
+            return self.hc_post_backend(sublayer_output, residual, post, comb)
+        return hc_post(sublayer_output, residual, post, comb)
 
     def __init__(self, config, vllm_config, layer_id):
         super().__init__()
@@ -156,17 +189,17 @@ class DeepseekV41Block(nn.Module):
             self.ffn(hidden_states.new_empty((0, self.config.hidden_size)))
             return hidden_states, pre_mix
         attn_pre, post, comb = self.mixes(hidden_states, "attn")
-        attended = self.attn(self.attn_norm(hc_pre(hidden_states, pre_mix)), runtime)
-        hidden_states = hc_post(attended, hidden_states, post, comb)
+        attended = self.attn(self.attn_norm(self._hc_pre(hidden_states, pre_mix)), runtime)
+        hidden_states = self._hc_post(attended, hidden_states, post, comb)
         ffn_pre, post, comb = self.mixes(hidden_states, "ffn")
-        ffn_input = self.ffn_norm(hc_pre(hidden_states, attn_pre))
+        ffn_input = self.ffn_norm(self._hc_pre(hidden_states, attn_pre))
         if getattr(runtime, "decode", None) is not None:
             output = self.ffn.forward_decode(ffn_input, runtime.decode.active if decode_mask is None else decode_mask)
         elif image_mask is not None:
             output = self.ffn(ffn_input, image_mask=image_mask)
         else:
             output = self.ffn(ffn_input)
-        return hc_post(output, hidden_states, post, comb), ffn_pre
+        return self._hc_post(output, hidden_states, post, comb), ffn_pre
 
 
 def read_parameter_slice(reader, key, parameter, module, tp_rank, tp_size):

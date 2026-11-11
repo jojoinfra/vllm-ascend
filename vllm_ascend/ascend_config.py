@@ -453,6 +453,8 @@ class AscendConfig:
     v41_cannbot_norm: bool = False
     # Adjacent-pair BF16 RoPE application with unchanged FP32 sin/cos.
     v41_cannbot_rope: bool = False
+    # HC4 BF16 pre/post residual mixing with the original NPU sum order.
+    v41_cannbot_residual: bool = False
     # Device-bounded paged index scores; experimental and opt-in.
     v41_cannbot_index: bool = False
     enable_sp_by_pass: bool = False

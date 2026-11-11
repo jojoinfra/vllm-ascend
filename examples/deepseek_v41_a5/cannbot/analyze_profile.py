@@ -19,7 +19,9 @@ def analyze(path):
     cache_read = []
     fp8 = []
     index = []
-    extra_kernels = {key: [] for key in ("fp4_quant", "rms_norm", "rotary_apply", "index_cube", "index_reduce")}
+    extra_kernels = {
+        key: [] for key in ("fp4_quant", "rms_norm", "rotary_apply", "hc_pre", "hc_post", "index_cube", "index_reduce")
+    }
     devices = set()
     with path.open() as stream:
         for row in csv.DictReader(stream):
@@ -48,6 +50,8 @@ def analyze(path):
                 ("fp4_quant", "fp4quantdequant"),
                 ("rms_norm", "rmsnormkernel"),
                 ("rotary_apply", "rotaryapplykernel"),
+                ("hc_pre", "hcprekernel"),
+                ("hc_post", "hcpostkernel"),
                 ("index_cube", "pagedindexcubekernel"),
                 ("index_reduce", "indexheadreducekernel"),
             ):

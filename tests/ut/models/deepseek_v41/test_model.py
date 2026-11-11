@@ -69,6 +69,73 @@ def test_hc_backend_rejects_non_hc4_before_importing_dsl(monkeypatch):
         block.init_hc_backend(SimpleNamespace(additional_config={"v41_cannbot_hc": True}))
 
 
+def test_residual_backend_cpu_fallback():
+    block = unloaded_module(model_module.DeepseekV41Block)
+
+    def unsupported(*args):
+        raise AssertionError("NPU residual backend received a CPU input")
+
+    block.hc_pre_backend = block.hc_post_backend = unsupported
+    hidden = torch.randn(2, 4, 5120, dtype=torch.bfloat16)
+    sublayer = torch.randn(2, 5120, dtype=torch.bfloat16)
+    pre, post, comb = torch.randn(2, 4), torch.randn(2, 4), torch.randn(2, 4, 4)
+    torch.testing.assert_close(block._hc_pre(hidden, pre), model_module.hc_pre(hidden, pre), rtol=0, atol=0)
+    torch.testing.assert_close(
+        block._hc_post(sublayer, hidden, post, comb), model_module.hc_post(sublayer, hidden, post, comb), rtol=0, atol=0
+    )
+
+
+def test_residual_backend_npu_graph_and_fallback():
+    pytest.importorskip("torch_npu")
+    if not torch.npu.is_available():
+        pytest.skip("NPU hardware is required")
+    block = unloaded_module(model_module.DeepseekV41Block)
+    block.config = SimpleNamespace(hc_mult=4, hidden_size=5120)
+    block.init_hc_backend(SimpleNamespace(additional_config={"v41_cannbot_residual": True}))
+    backing = torch.randn(2, 4, 10240, dtype=torch.bfloat16, device="npu")
+    hidden = backing[..., ::2]
+    sublayer = torch.randn(2, 5120, dtype=torch.bfloat16, device="npu")
+    pre, post = torch.randn(2, 4, device="npu"), torch.randn(2, 4, device="npu")
+    comb = torch.randn(2, 4, 4, device="npu")
+    with torch.inference_mode():
+        block._hc_pre(hidden, pre)
+        block._hc_post(sublayer, hidden, post, comb)
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            mixed = block._hc_pre(hidden, pre)
+            result = block._hc_post(sublayer, hidden, post, comb)
+        for replay in range(8):
+            for value in (backing, sublayer, pre, post, comb):
+                value.normal_()
+            if replay == 0:
+                hidden[0, 0, 0], hidden[1, 0, 0] = float("nan"), float("inf")
+            graph.replay()
+            torch.testing.assert_close(mixed, model_module.hc_pre(hidden, pre), rtol=0, atol=0, equal_nan=True)
+            torch.testing.assert_close(
+                result, model_module.hc_post(sublayer, hidden, post, comb), rtol=0, atol=0, equal_nan=True
+            )
+
+        def unsupported(*args):
+            raise AssertionError("Unsupported input reached the residual backend")
+
+        block.hc_pre_backend = block.hc_post_backend = unsupported
+        for rows, dtype in ((129, torch.bfloat16), (2, torch.float32)):
+            hidden = torch.randn(rows, 4, 5120, device="npu", dtype=dtype)
+            sublayer = torch.randn(rows, 5120, device="npu", dtype=dtype)
+            pre, post, comb = (
+                torch.randn(rows, 4, device="npu"),
+                torch.randn(rows, 4, device="npu"),
+                torch.randn(rows, 4, 4, device="npu"),
+            )
+            torch.testing.assert_close(block._hc_pre(hidden, pre), model_module.hc_pre(hidden, pre), rtol=0, atol=0)
+            torch.testing.assert_close(
+                block._hc_post(sublayer, hidden, post, comb),
+                model_module.hc_post(sublayer, hidden, post, comb),
+                rtol=0,
+                atol=0,
+            )
+
+
 def test_hc_backend_keeps_checkpoint_iterations_and_epsilon(monkeypatch):
     class Backend:
         def __init__(self, iterations, eps):

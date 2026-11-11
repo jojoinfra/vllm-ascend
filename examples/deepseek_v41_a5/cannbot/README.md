@@ -313,3 +313,22 @@ retains the separately declared autoregressive decoding policy and the frozen
 requests, weights, token counts, physical cards and zero cache-hit checks.
 GSM8K first8 8/8 and the image check passed. The comparison is sequential on a
 shared host; the 10x target remains unmet.
+
+## HC residual mixing candidate
+
+`--enable-residual` enables BF16 HC4 pre/post mixing in 5120-wide target and
+DSpark blocks for up to 128 rows. Unsupported sizes, dtypes and devices retain
+the reference. The default is off. The reduction explicitly computes
+`(a+c)+(b+d)`, matching the initial NPU path: sequential summation changed
+22 of 655,360 BF16 outputs in the order audit, while the chosen order matched
+all of them.
+
+The 256-element tile version passed 182 numerical checks and 60 changing-input
+graph replays, including all BF16 encodings and strided coefficients. Checks
+require exact finite output bits and matching nonfinite classifications.
+At two rows, pre-mixing measured about 10.0 to 3.3 us and post-mixing 13.8 to
+4.7 us. The larger tiles also improved all measured row counts through 128;
+the earlier 64-element version regressed for 48/128 rows and is not deployed.
+These are operator measurements. Integration passed 123 CPU regressions and
+one NPU test covering eight graph replays, strided residuals, NaN/Inf and
+dtype/row-count fallbacks. End-to-end measurement is recorded separately.
