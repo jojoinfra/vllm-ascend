@@ -24,6 +24,7 @@ def main():
     parser.add_argument("--port", type=int, default=8010)
     parser.add_argument("--deployment", type=Path, required=True)
     parser.add_argument("--enable-hc", action="store_true")
+    parser.add_argument("--profile-dir", type=Path, help="New output directory for a separate profiling run")
     args = parser.parse_args()
     if not 1 <= args.port <= 65535:
         raise ValueError("Port must be in 1..65535")
@@ -89,7 +90,21 @@ def main():
         (str(deployment), "/deployment"),
     ):
         command += ["-v", f"{source}:{target}:ro"]
+    if args.profile_dir:
+        args.profile_dir.mkdir(parents=True, exist_ok=False)
+        command += ["-v", f"{args.profile_dir.resolve()}:/profiles"]
     command += ["--entrypoint", "bash", args.image, "/deployment/serve.sh"]
+    if args.profile_dir:
+        command += [
+            "--profiler-config",
+            json.dumps(
+                {
+                    "profiler": "torch",
+                    "torch_profiler_dir": "/profiles",
+                    "torch_profiler_with_stack": False,
+                }
+            ),
+        ]
     if args.enable_hc:
         command += [
             "--additional-config",

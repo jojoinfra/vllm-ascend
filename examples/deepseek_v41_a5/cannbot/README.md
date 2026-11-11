@@ -63,6 +63,29 @@ and `--deployment` containing the unchanged initial `serve.sh` and fixed
 `reference/chat_template.jinja`. Add `--enable-hc` only after numerical checks.
 The default local service port is 8010. It never stops or replaces containers.
 
+For a separate profiling service, also supply `--profile-dir` with a new output
+directory. After the service is healthy, `capture_fixed.py --container NAME
+--scenario-dir DIRECTORY --output FILE` runs the frozen warmup, starts profiling,
+runs the fixed requests, and stops profiling. Its output explicitly excludes
+profiled throughput from performance claims. Keep the native traces alongside
+the capture report; a successful HTTP response alone does not establish that
+every rank exported a complete trace.
+
+## First measured candidate
+
+The HC v3 image passed 96 numerical cases, 20 graph replays, 71 CPU regressions
+and the eight-question GSM8K integration regression. On physical NPU1–4, three
+unprofiled initial-image rounds averaged 75.33 output tokens/s; HC v3 averaged
+76.54 output tokens/s. The ratio of means is 1.016, while the ratio of medians
+is 0.991. The ranges overlap, so these rounds do not establish a stable gain.
+The other experiment on the shared host was not controlled. The 10x target
+against this fresh baseline is 753.27 output tokens/s and remains unmet.
+
+Raw rounds and the comparison are retained under `baseline-rounds-v2/`,
+`hc-v3-rounds/`, and `hc-v3-comparison.json` in the evidence directory below.
+The GSM8K check covers only eight examples, not the full benchmark. The
+candidate remains opt-in while profiling and further optimization continue.
+
 Local evidence and the separate NPU1–4 scenario are under
 `/home/jojo/dsv41-cannbot-10x-20261111/`. Check current JSON/log results before
 using a candidate; a successful build manifest alone is not an acceptance gate.
