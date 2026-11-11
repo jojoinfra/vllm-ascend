@@ -337,3 +337,30 @@ Three fixed rounds measured **166.03, 170.11, 170.76 output tokens/s**, mean
 8/8 and the image check passed. The decoding policy and workload remain as
 declared for the previous autoregressive candidate. These sequential runs on
 a shared host do not establish a controlled A/B effect; the 10x target is unmet.
+The complete four-rank profile contains 40,976 kernel records per rank, including
+544 rotary applications and 320 each of HC pre/post mixing, confirming that the
+new paths execute. Profile latency is excluded from throughput comparisons.
+
+## Cache read metadata candidate
+
+`--enable-cache-slots` combines read-slot lookup and validity masking for
+128-token pages and position matrices whose column count is a multiple of 64.
+It supports tables up to 512 blocks, nonnegative storage sizes fitting int32,
+int64 positions, int32 page tables/lengths and boolean active flags. Unsupported
+inputs retain the original operations. The option defaults off and leaves the
+cache values and field layouts unchanged.
+
+Both halves of every int64 position participate in validity checks, so large
+or negative positions cannot wrap to valid low 32-bit positions. Page bounds
+are checked before multiplying physical pages into int32 slots. Each cache
+owns a bounded compilation cache; lengths, page tables and active flags remain
+dynamic graph inputs.
+
+`cache-slots-npu-v1.json` passed 40 exact numerical checks and 24 changing-input
+graph replays, including int64 position extremes, int32 page extremes, partial
+physical pages and empty batches. At two rows and 640 columns, the metadata
+operations measured about 27 us for the reference and 3.4 us for the fusion.
+Integration passed 124 CPU regressions and six NPU cache-read tests with 36
+graph replays across raw, compressed and index fields for compression ratios
+one and two. Both BF16 and FP32 storage and nonaligned fallback are covered.
+These are operation/integration checks; full-model results are recorded separately.

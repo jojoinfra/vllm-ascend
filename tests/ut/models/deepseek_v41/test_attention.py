@@ -666,6 +666,82 @@ def test_cache_backend_fallback_keeps_original_read(make_layer, ratio, bank, off
     torch.testing.assert_close(cache.decode_read(md, positions, bank, offset, width), expected, rtol=0, atol=0)
 
 
+def test_cache_slot_backend_cpu_fallback(make_layer, tensor_device):
+    if tensor_device != "cpu":
+        pytest.skip("CPU fallback check")
+    cache = make_layer(2).cache
+    cache.block_size = 128
+
+    def unsupported(*args):
+        raise AssertionError("Slot backend received CPU tensors")
+
+    cache.slot_factory = unsupported
+    md = attention.DeepseekV41DecodeMetadata(
+        torch.tensor([8], dtype=torch.int32),
+        torch.tensor([0]),
+        torch.zeros(1, 4, dtype=torch.int32),
+        torch.tensor([True]),
+        512,
+    )
+    positions = torch.arange(64).reshape(1, 64)
+    assert cache._decode_read_slots(md, positions, 512) is None
+
+
+@pytest.mark.parametrize("ratio", [1, 2])
+@pytest.mark.parametrize("bank,kind", [(0, "raw"), (0, "compressed"), (1, "index")])
+def test_cache_slot_backend_npu_read_graph(make_layer, tensor_device, ratio, bank, kind):
+    if tensor_device != "npu":
+        pytest.skip("NPU hardware required")
+    from vllm_ascend.models.deepseek_v41.cannbot_cache_slots import CacheReadSlots
+
+    cache = make_layer(ratio).cache
+    cache.block_size = 128
+    paged_cache.allocate(cache, 12, 128)
+    md = attention.DeepseekV41DecodeMetadata(
+        torch.tensor([180, 250], dtype=torch.int32),
+        torch.tensor([0, 128]),
+        torch.tensor([[0, 2, 3, 4], [5, 6, 7, 8]], dtype=torch.int32),
+        torch.tensor([True, True]),
+        512,
+    )
+    positions = torch.arange(640, dtype=torch.int64).expand(2, -1).clone()
+    offset = 0 if kind == "raw" else cache.dim
+    width = cache.index_dim if kind == "index" else cache.dim
+    field = cache.field(bank, offset, width)
+    field.normal_()
+    expected = cache.decode_read(md, positions, bank, offset, width)
+    cache.slot_factory = CacheReadSlots
+    with torch.inference_mode():
+        torch.testing.assert_close(cache.decode_read(md, positions, bank, offset, width), expected, rtol=0, atol=0)
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            actual = cache.decode_read(md, positions, bank, offset, width)
+        for replay in range(6):
+            field.normal_()
+            positions.random_(-128, 640)
+            positions[0, 0], positions[1, 0] = -(2**63), 2**63 - 1
+            md.block_table_tensor.random_(-1, 14)
+            md.seq_lens.random_(0, 513)
+            md.active.logical_not_()
+            graph.replay()
+            cache.slot_factory = None
+            expected = cache.decode_read(md, positions, bank, offset, width)
+            cache.slot_factory = CacheReadSlots
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        assert len(cache.slot_backends) == 1
+        cache.slot_factory = None
+        expected = cache.decode_read(md, positions[:, :63], bank, offset, width)
+
+        def unsupported(*args):
+            raise AssertionError("Nonaligned width reached the slot backend")
+
+        cache.slot_factory = unsupported
+        cache.slot_backends = {}
+        torch.testing.assert_close(
+            cache.decode_read(md, positions[:, :63], bank, offset, width), expected, rtol=0, atol=0
+        )
+
+
 class CPUSequenceGroup:
     """Use real Gloo collectives for the tiny TP2 layout comparison."""
 

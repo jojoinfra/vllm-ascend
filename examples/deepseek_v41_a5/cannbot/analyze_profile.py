@@ -20,7 +20,17 @@ def analyze(path):
     fp8 = []
     index = []
     extra_kernels = {
-        key: [] for key in ("fp4_quant", "rms_norm", "rotary_apply", "hc_pre", "hc_post", "index_cube", "index_reduce")
+        key: []
+        for key in (
+            "fp4_quant",
+            "rms_norm",
+            "rotary_apply",
+            "hc_pre",
+            "hc_post",
+            "cache_read_slots",
+            "index_cube",
+            "index_reduce",
+        )
     }
     devices = set()
     with path.open() as stream:
@@ -52,6 +62,7 @@ def analyze(path):
                 ("rotary_apply", "rotaryapplykernel"),
                 ("hc_pre", "hcprekernel"),
                 ("hc_post", "hcpostkernel"),
+                ("cache_read_slots", "cachereadslotskernel"),
                 ("index_cube", "pagedindexcubekernel"),
                 ("index_reduce", "indexheadreducekernel"),
             ):

@@ -27,6 +27,7 @@ def main():
     parser.add_argument("--parallel-layout", choices=("tp4", "dp4"), default="tp4")
     parser.add_argument("--enable-hc", action="store_true")
     parser.add_argument("--enable-cache", action="store_true")
+    parser.add_argument("--enable-cache-slots", action="store_true")
     parser.add_argument("--enable-fp8", action="store_true")
     parser.add_argument("--enable-fp4", action="store_true")
     parser.add_argument("--enable-norm", action="store_true")
@@ -140,6 +141,7 @@ def main():
     if (
         args.enable_hc
         or args.enable_cache
+        or args.enable_cache_slots
         or args.enable_fp8
         or args.enable_fp4
         or args.enable_norm
@@ -155,6 +157,8 @@ def main():
             additional["v41_cannbot_hc"] = True
         if args.enable_cache:
             additional["v41_cannbot_cache"] = True
+        if args.enable_cache_slots:
+            additional["v41_cannbot_cache_slots"] = True
         if args.enable_fp8:
             additional["v41_cannbot_fp8"] = True
         if args.enable_fp4:

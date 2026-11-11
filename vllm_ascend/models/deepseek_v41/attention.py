@@ -271,7 +271,14 @@ class DeepseekV41Cache(nn.Module, AttentionLayerBase):
         self.kv_cache = None
         self.native_layout = None
         self.cache_backend = None
+        self.slot_factory = None
+        self.slot_backends = {}
         additional = getattr(vllm_config, "additional_config", None) or {}
+        if validate_additional_config_bool(additional.get("v41_cannbot_cache_slots", False), "v41_cannbot_cache_slots"):
+            if self.block_size == 128:
+                from .cannbot_cache_slots import CacheReadSlots
+
+                self.slot_factory = CacheReadSlots
         if validate_additional_config_bool(additional.get("v41_cannbot_cache", False), "v41_cannbot_cache"):
             from .cannbot_cache import CacheFieldBackend
 
@@ -363,9 +370,6 @@ class DeepseekV41Cache(nn.Module, AttentionLayerBase):
             )
             if result is not None:
                 return result
-        pos = positions.clamp(0, md.max_model_len - 1)
-        blocks = md.block_table_tensor.gather(1, pos // self.block_size).long()
-        slots = blocks * self.block_size + pos % self.block_size
         if self.cache_backend is not None:
             # Gather the requested rows before slicing their fields. Slicing
             # the complete NPU cache can materialize hundreds of MiB per read.
@@ -374,13 +378,43 @@ class DeepseekV41Cache(nn.Module, AttentionLayerBase):
                 pages, start = self.field(bank, offset, width), 0
         else:
             pages, start = self.field(bank, offset, width), 0
-        valid = md.active[:, None] & (positions >= 0) & (positions < md.seq_lens[:, None])
-        valid = valid & (slots >= 0) & (slots < pages.shape[0])
-        safe = torch.where(valid, slots, 0)
+        fused = self._decode_read_slots(md, positions, pages.shape[0])
+        if fused is None:
+            pos = positions.clamp(0, md.max_model_len - 1)
+            blocks = md.block_table_tensor.gather(1, pos // self.block_size).long()
+            slots = blocks * self.block_size + pos % self.block_size
+            valid = md.active[:, None] & (positions >= 0) & (positions < md.seq_lens[:, None])
+            valid = valid & (slots >= 0) & (slots < pages.shape[0])
+            safe = torch.where(valid, slots, 0)
+        else:
+            safe, valid = fused
         values = pages.index_select(0, safe.flatten())
         values = values[:, start : start + width]
         values = values.reshape(*positions.shape, width)
         return torch.where(valid[..., None], values, 0)
+
+    def _decode_read_slots(self, md, positions, storage_rows):
+        if (
+            self.slot_factory is None
+            or self.block_size != 128
+            or positions.device.type not in ("npu", "privateuseone")
+            or positions.ndim != 2
+            or positions.shape[1] % 64
+            or positions.dtype != torch.int64
+            or md.block_table_tensor.dtype != torch.int32
+            or md.seq_lens.dtype != torch.int32
+            or md.active.dtype != torch.bool
+            or not 0 < md.block_table_tensor.shape[1] <= 512
+            or not 0 < md.max_model_len <= md.block_table_tensor.shape[1] * 128
+            or not 0 < storage_rows < 2**31
+        ):
+            return None
+        key = (md.block_table_tensor.shape[1], md.max_model_len, storage_rows)
+        if key not in self.slot_backends:
+            if len(self.slot_backends) >= 8:
+                return None
+            self.slot_backends[key] = self.slot_factory(*key)
+        return self.slot_backends[key](positions, md.block_table_tensor, md.seq_lens, md.active)
 
     def decode_write(self, md, values, bank, offset, enabled):
         """Preserve cache bits for inactive rows, including a live write to slot zero."""

@@ -445,6 +445,8 @@ class AscendConfig:
     v41_cannbot_hc: bool = False
     # Direct cache writes and short compressor reads; graph-tested A5 prototype.
     v41_cannbot_cache: bool = False
+    # Integer read-slot/mask fusion for 64-aligned decode gathers.
+    v41_cannbot_cache_slots: bool = False
     # BF16 E4M3 activation QDQ fusion; disabled until explicitly selected.
     v41_cannbot_fp8: bool = False
     # BF16 E2M1 QDQ with original index/compressed-KV scale formats.
