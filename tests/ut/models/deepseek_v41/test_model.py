@@ -604,7 +604,8 @@ def test_sixteen_live_requests_restore_independent_history_across_pages(staged_h
         positions = torch.full((16,), position)
         slots = table[:, position // 2].long() * 2 + position % 2
         decode = DeepseekV41DecodeMetadata(positions + 1, slots, table, torch.ones(16, dtype=torch.bool), 4)
-        cache.metadata = lambda: DeepseekV41Metadata([], table, slots, 16, decode)
+        metadata = DeepseekV41Metadata([], table, slots, 16, decode)
+        cache.metadata = lambda current=metadata: current
         expected_cache = paged_cache.snapshot(cache)
         assert model.prepare_decode_graph_inputs(tokens, positions) == 16
         for row, request in enumerate(order):
