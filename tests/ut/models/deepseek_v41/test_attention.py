@@ -606,6 +606,143 @@ def test_cache_spec_accounts_for_mixed_precision_source(make_layer):
     assert layer.cache.field(1, layer.dim, layer.config.index_head_dim).dtype == torch.bfloat16
 
 
+def test_optional_cache_backend_receives_backing_and_live_mask(make_layer):
+    cache = make_layer(2).cache
+    assert cache.cache_backend is None
+    slots = torch.tensor([0, -1, 7], dtype=torch.int64)
+    active = torch.tensor([True, True, False])
+    md = attention.DeepseekV41DecodeMetadata(
+        torch.tensor([1, 2, 3]), slots, torch.zeros(3, 4, dtype=torch.int32), active, 16, 1
+    )
+    values = torch.ones(3, cache.dim)
+    positions = torch.zeros(3, 2, dtype=torch.int64)
+    expected = torch.full((3, 2, cache.dim), 17.0)
+
+    class Backend:
+        def write(self, storage, supplied, mapped_slots, enabled, offset):
+            assert storage.shape == (48, 2 * cache.dim)
+            assert storage.dtype == torch.float32
+            assert offset == 0
+            assert supplied is values
+            assert mapped_slots is slots
+            torch.testing.assert_close(enabled, torch.tensor([True, False, False]))
+            return True
+
+        def read(self, storage, supplied, table, lengths, live, offset, width):
+            assert storage.shape == (48, 2 * cache.dim)
+            assert storage.dtype == torch.float32
+            assert offset == cache.dim and width == cache.dim
+            assert supplied is positions and table is md.block_table_tensor
+            assert lengths is md.seq_lens and live is md.active
+            return expected
+
+    cache.cache_backend = Backend()
+    before = paged_cache.snapshot(cache)
+    cache.decode_write(md, values, 0, cache.dim, torch.tensor([True, False, True]))
+    assert cache.decode_read(md, positions, 1, 0, cache.dim) is expected
+    torch.testing.assert_close(paged_cache.bits(cache), before, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("ratio", [1, 2])
+@pytest.mark.parametrize("bank,offset_kind", [(0, "raw"), (0, "compressed"), (1, "index")])
+@pytest.mark.parametrize("repeat", [1, 32])
+def test_cache_backend_fallback_keeps_original_read(make_layer, ratio, bank, offset_kind, repeat):
+    cache = make_layer(ratio).cache
+    md = attention.DeepseekV41DecodeMetadata(
+        torch.tensor([1, 2]),
+        torch.tensor([0, 1]),
+        torch.zeros(2, 4, dtype=torch.int32),
+        torch.tensor([True, False]),
+        16,
+        1,
+    )
+    positions = torch.tensor([[0, 1, 16, -1], [-1, 0, 1, 7]]).repeat(1, repeat)
+    offset = 0 if offset_kind == "raw" else cache.dim
+    width = cache.index_dim if offset_kind == "index" else cache.dim
+    for backing in cache.pages():
+        backing.copy_(torch.randn_like(backing))
+    expected = cache.decode_read(md, positions, bank, offset, width)
+    cache.cache_backend = SimpleNamespace(read=lambda *args: None)
+    torch.testing.assert_close(cache.decode_read(md, positions, bank, offset, width), expected, rtol=0, atol=0)
+
+
+def test_cache_slot_backend_cpu_fallback(make_layer, tensor_device):
+    if tensor_device != "cpu":
+        pytest.skip("CPU fallback check")
+    cache = make_layer(2).cache
+    cache.block_size = 128
+
+    def unsupported(*args):
+        raise AssertionError("Slot backend received CPU tensors")
+
+    cache.slot_factory = unsupported
+    md = attention.DeepseekV41DecodeMetadata(
+        torch.tensor([8], dtype=torch.int32),
+        torch.tensor([0]),
+        torch.zeros(1, 4, dtype=torch.int32),
+        torch.tensor([True]),
+        512,
+    )
+    positions = torch.arange(64).reshape(1, 64)
+    assert cache._decode_read_slots(md, positions, 512) is None
+
+
+@pytest.mark.parametrize("ratio", [1, 2])
+@pytest.mark.parametrize("bank,kind", [(0, "raw"), (0, "compressed"), (1, "index")])
+@pytest.mark.parametrize("length_dtype", [torch.int32, torch.int64])
+def test_cache_slot_backend_npu_read_graph(make_layer, tensor_device, ratio, bank, kind, length_dtype):
+    if tensor_device != "npu":
+        pytest.skip("NPU hardware required")
+    from vllm_ascend.models.deepseek_v41.cannbot_cache_slots import CacheReadSlots
+
+    cache = make_layer(ratio).cache
+    cache.block_size = 128
+    paged_cache.allocate(cache, 12, 128)
+    md = attention.DeepseekV41DecodeMetadata(
+        torch.tensor([180, 250], dtype=length_dtype),
+        torch.tensor([0, 128]),
+        torch.tensor([[0, 2, 3, 4], [5, 6, 7, 8]], dtype=torch.int32),
+        torch.tensor([True, True]),
+        512,
+    )
+    positions = torch.arange(640, dtype=torch.int64).expand(2, -1).clone()
+    offset = 0 if kind == "raw" else cache.dim
+    width = cache.index_dim if kind == "index" else cache.dim
+    field = cache.field(bank, offset, width)
+    field.normal_()
+    expected = cache.decode_read(md, positions, bank, offset, width)
+    cache.slot_factory = CacheReadSlots
+    with torch.inference_mode():
+        torch.testing.assert_close(cache.decode_read(md, positions, bank, offset, width), expected, rtol=0, atol=0)
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            actual = cache.decode_read(md, positions, bank, offset, width)
+        for replay in range(6):
+            field.normal_()
+            positions.random_(-128, 640)
+            positions[0, 0], positions[1, 0] = -(2**63), 2**63 - 1
+            md.block_table_tensor.random_(-1, 14)
+            md.seq_lens.random_(0, 513)
+            md.active.logical_not_()
+            graph.replay()
+            cache.slot_factory = None
+            expected = cache.decode_read(md, positions, bank, offset, width)
+            cache.slot_factory = CacheReadSlots
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        assert len(cache.slot_backends) == 1
+        cache.slot_factory = None
+        expected = cache.decode_read(md, positions[:, :63], bank, offset, width)
+
+        def unsupported(*args):
+            raise AssertionError("Nonaligned width reached the slot backend")
+
+        cache.slot_factory = unsupported
+        cache.slot_backends = {}
+        torch.testing.assert_close(
+            cache.decode_read(md, positions[:, :63], bank, offset, width), expected, rtol=0, atol=0
+        )
+
+
 class CPUSequenceGroup:
     """Use real Gloo collectives for the tiny TP2 layout comparison."""
 
@@ -821,3 +958,213 @@ def test_verify_cache_scatter_keeps_slot_zero_with_padding(make_layer):
     torch.testing.assert_close(cache.pages()[0], expected, rtol=0, atol=0)
     cache.decode_write(md, values * -1, 0, 1, torch.zeros_like(live))
     torch.testing.assert_close(cache.pages()[0], expected, rtol=0, atol=0)
+
+
+def test_projection_qdq_callback_preserves_tiling():
+    calls = []
+    output = torch.randn(257, 64, dtype=torch.bfloat16)
+    golden = attention.fp8_quant_dequant(output)
+
+    def quantize(x, block_size, *, inplace=False):
+        calls.append((x.shape[0], block_size, inplace))
+        return attention.fp8_quant_dequant(x, block_size, inplace=inplace)
+
+    actual = attention._quantize_projection_input(output, quantize)
+    assert actual is output
+    torch.testing.assert_close(actual, golden, rtol=0, atol=0)
+    assert calls == [(256, 32, True), (1, 32, True)]
+
+
+def test_fp8_backend_falls_back_for_float32(make_layer):
+    layer = make_layer(ratio=0)
+
+    def unsupported(*args, **kwargs):
+        raise AssertionError("BF16 backend must not receive FP32")
+
+    layer.fp8_backend = unsupported
+    x = torch.randn(3, 32, dtype=torch.float32)
+    torch.testing.assert_close(layer._quantize_fp8(x), attention.fp8_quant_dequant(x), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("group,scale_format", [(32, "e8m0"), (16, "e4m3")])
+def test_fp4_backend_falls_back_for_float32(make_layer, group, scale_format):
+    layer = make_layer(ratio=2)
+
+    def unsupported(*args):
+        raise AssertionError("BF16 backend must not receive FP32")
+
+    layer.fp4_backends = {(group, scale_format): unsupported}
+    x = torch.randn(3, 32, dtype=torch.float32)
+    actual = layer._quantize_fp4(x, group, scale_format=scale_format)
+    expected = attention.fp4_quant_dequant(x, group, scale_format=scale_format)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("group,scale_format", [(32, "e8m0"), (16, "e4m3")])
+def test_fp4_backend_npu_dispatch(make_layer, tensor_device, group, scale_format):
+    if tensor_device != "npu":
+        pytest.skip("NPU dispatch requires hardware")
+    from vllm_ascend.models.deepseek_v41.cannbot_fp4 import FP4QuantDequant
+
+    layer = make_layer(ratio=2)
+    kernel = FP4QuantDequant(group, scale_format)
+    calls = []
+
+    def backend(x):
+        calls.append(x.shape)
+        return kernel(x)
+
+    layer.fp4_backends = {(group, scale_format): backend}
+    x = torch.randn(3, 128, dtype=torch.bfloat16)
+    actual = layer._quantize_fp4(x, group, scale_format=scale_format)
+    expected = attention.fp4_quant_dequant(x, group, scale_format=scale_format)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert calls == [x.shape]
+
+
+def test_rope_backend_preserves_cpu_fallback(make_layer, tensor_device):
+    if tensor_device != "cpu":
+        pytest.skip("CPU fallback check")
+    layer = make_layer()
+    layer.rope_dim = 64
+    layer.frequencies = torch.randn(32)
+
+    def unsupported(*args):
+        raise AssertionError("NPU backend must not receive CPU inputs")
+
+    layer.rope_factory = unsupported
+    x = torch.randn(1, 2, 64, 512, dtype=torch.bfloat16)
+    positions = torch.tensor([10, 1000])
+    phases = positions.float().unsqueeze(-1) * layer.frequencies
+    expected = x.clone()
+    attention.apply_rotary_emb_real(expected[..., -64:], phases.cos(), phases.sin())
+    assert layer.rotate(x, positions) is x
+    torch.testing.assert_close(x, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("inverse", [False, True])
+@pytest.mark.parametrize("shape", [(1, 2, 128), (1, 2, 64, 512)])
+def test_rope_backend_npu_graph_and_fallback(make_layer, tensor_device, inverse, shape):
+    if tensor_device != "npu":
+        pytest.skip("NPU dispatch requires hardware")
+    layer = make_layer()
+    layer.rope_dim = 64
+    layer.frequencies = torch.randn(32)
+    layer.init_rotary_backend(SimpleNamespace(additional_config={"v41_cannbot_rope": True}))
+    x = torch.randn(*shape, dtype=torch.bfloat16)
+    positions = torch.tensor([1, 100])
+    with torch.inference_mode():
+        layer.rotate(x, positions, inverse)
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            layer.rotate(x, positions, inverse)
+        for replay in range(4):
+            x.normal_()
+            positions.add_(37)
+            phases = positions.float().unsqueeze(-1) * layer.frequencies
+            expected = x.clone()
+            attention.apply_rotary_emb_real(expected[..., -64:], phases.cos(), phases.sin(), inverse)
+            graph.replay()
+            torch.testing.assert_close(x, expected, rtol=0, atol=0)
+        assert len(layer.rope_backends) == 1
+        # Exercise unsupported sequence length, strides, dtype and head count.
+        samples = [
+            torch.randn(1, 49, 128, dtype=torch.bfloat16),
+            torch.randn(1, 2, 256, dtype=torch.bfloat16)[..., ::2],
+            torch.randn(1, 2, 128, dtype=torch.float32),
+            torch.randn(1, 2, 3, 128, dtype=torch.bfloat16),
+        ]
+
+        def unsupported(*args):
+            raise AssertionError("Unsupported input reached the RoPE backend")
+
+        layer.rope_factory = unsupported
+        layer.rope_backends = {}
+        for sample in samples:
+            positions = torch.arange(sample.shape[1])
+            phases = positions.float().unsqueeze(-1) * layer.frequencies
+            expected = sample.clone()
+            attention.apply_rotary_emb_real(expected[..., -64:], phases.cos(), phases.sin(), inverse)
+            assert layer.rotate(sample, positions, inverse) is sample
+            torch.testing.assert_close(sample, expected, rtol=0, atol=0)
+
+
+def test_norm_backend_preserves_cpu_fallback(tensor_device):
+    if tensor_device != "cpu":
+        pytest.skip("CPU fallback check")
+    norm = attention.DeepseekV41RMSNorm(128, 1e-20)
+    norm.weight.data.fill_(1)
+
+    def unsupported(*args):
+        raise AssertionError("NPU backend must not receive CPU inputs")
+
+    norm.cannbot_factory = unsupported
+    x = torch.randn(3, 128, dtype=torch.bfloat16)
+    torch.testing.assert_close(norm(x), attention.rms_norm(x, norm.weight, norm.eps), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("weight_dtype", [torch.bfloat16, torch.float32])
+def test_norm_backend_npu_graph_and_edges(tensor_device, weight_dtype):
+    if tensor_device != "npu":
+        pytest.skip("NPU dispatch requires hardware")
+    norm = attention.DeepseekV41RMSNorm(5120, 1e-20)
+    norm.weight = nn.Parameter(torch.randn(5120, dtype=weight_dtype), requires_grad=False)
+    attention.configure_cannbot_norms(norm, SimpleNamespace(additional_config={"v41_cannbot_norm": True}))
+    assert norm.cannbot_factory is not None
+    backing = torch.randn(3, 10240, dtype=torch.bfloat16)
+    x = backing[:, ::2]
+    with torch.inference_mode():
+        assert norm(x[:0]).shape == (0, 5120)
+        norm(x)
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            output = norm(x)
+        for replay in range(4):
+            backing.normal_()
+            norm.weight.normal_()
+            if replay == 0:
+                x[0, 0], x[1, 0] = float("nan"), float("inf")
+                x[2].zero_()
+            graph.replay()
+            expected = attention.rms_norm(x, norm.weight, norm.eps)
+            actual, expected = output.cpu(), expected.cpu()
+            torch.testing.assert_close(actual, expected, rtol=1 / 128, atol=0, equal_nan=True)
+            finite = expected.isfinite()
+            left, right = actual.view(torch.int16).int(), expected.view(torch.int16).int()
+            left, right = torch.where(left < 0, -32768 - left, left), torch.where(right < 0, -32768 - right, right)
+            assert int((left - right).abs()[finite].max()) <= 1
+        assert len(norm.cannbot_backends) == 1
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_decode_index_backend_preserves_selection_and_source_metadata(make_layer, fallback):
+    layer = make_layer(2)
+    md = multirow_metadata([4, 3, 0], [[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11]]).decode
+    runtime = attention.DeepseekV41Runtime([], decode=md)
+    runtime.source_cache, runtime.source_decode = layer.cache, md
+    for bank in layer.cache.kv_cache:
+        bank.normal_()
+    x = hidden_tokens(3, 157)
+    qr = hidden_tokens(3, 158)
+    pos = (md.seq_lens - 1).clamp_min(0)
+    with torch.no_grad():
+        layer._decode_index(x, qr, pos, md, runtime)
+        expected = runtime.decode_topk.clone()
+        calls = []
+
+        def backend(storage, query, weights, table, lengths, active, offset, capacity):
+            calls.append(capacity)
+            assert table is md.block_table_tensor and lengths is md.seq_lens and active is md.active
+            backing, start = layer.cache.field_storage(1, layer.dim, layer.config.index_head_dim)
+            assert storage.data_ptr() == backing.data_ptr() and offset == start
+            if fallback:
+                return None
+            positions = ((torch.arange(capacity) + 1) * layer.ratio - 1).expand(x.shape[0], -1)
+            keys = layer.cache.decode_read(md, positions, 1, layer.dim, layer.config.index_head_dim)
+            per_head = torch.einsum("bhd,btd->bht", query, keys.to(query.dtype))
+            return (per_head.relu_() * weights.unsqueeze(-1)).sum(1)
+
+        layer.index_backend = backend
+        layer._decode_index(x, qr, pos, md, runtime)
+        torch.testing.assert_close(runtime.decode_topk, expected, rtol=0, atol=0)
+        assert calls == [md.max_model_len // layer.ratio]

@@ -36,6 +36,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
+from vllm_ascend.ascend_config import validate_additional_config_bool
 from vllm_ascend.utils import enable_dsa_cp, enable_sp
 
 from .attention_ops import (
@@ -55,12 +56,14 @@ _OUTPUT_QDQ_TILE_ROWS = 256
 _DECODE_INDEX_TILE_KEYS = 8192
 
 
-def _quantize_projection_input(output):
+def _quantize_projection_input(output, quantizer=None):
     """Consume the attention output; E4M3 quantization groups only its last dimension."""
+    if quantizer is None:
+        quantizer = fp8_quant_dequant
     if output.shape[0] <= _OUTPUT_QDQ_TILE_ROWS:
-        return fp8_quant_dequant(output, 32)
+        return quantizer(output, 32)
     for tile in output.split(_OUTPUT_QDQ_TILE_ROWS):
-        fp8_quant_dequant(tile, 32, inplace=True)
+        quantizer(tile, 32, inplace=True)
     return output
 
 
@@ -267,6 +270,27 @@ class DeepseekV41Cache(nn.Module, AttentionLayerBase):
         self.block_size = vllm_config.cache_config.block_size
         self.kv_cache = None
         self.native_layout = None
+        self.cache_backend = None
+        self.slot_factory = None
+        self.slot_backends = {}
+        additional = getattr(vllm_config, "additional_config", None) or {}
+        if validate_additional_config_bool(additional.get("v41_cannbot_cache_slots", False), "v41_cannbot_cache_slots"):
+            if self.block_size == 128:
+                from .cannbot_cache_slots import CacheReadSlots
+
+                self.slot_factory = CacheReadSlots
+        if validate_additional_config_bool(additional.get("v41_cannbot_cache", False), "v41_cannbot_cache"):
+            from .cannbot_cache import CacheFieldBackend
+
+            self.cache_backend = CacheFieldBackend(self.block_size)
+            self.cache_backend.prepare(self.key_width, self.dim, 0, torch.bfloat16)
+            if source_ratio > 1:
+                self.cache_backend.prepare(self.key_width, self.index_dim, self.dim, torch.bfloat16)
+                self.cache_backend.prepare(self.value_width // 2, self.dim, 0, torch.float32)
+                self.cache_backend.prepare(self.value_width // 2, self.dim, self.dim, torch.float32)
+            elif source_ratio == 1:
+                self.cache_backend.prepare(self.value_width, self.dim, 0, torch.bfloat16)
+                self.cache_backend.prepare(self.value_width, self.index_dim, self.dim, torch.bfloat16)
         context = vllm_config.compilation_config.static_forward_context
         if prefix in context:
             raise ValueError(f"Duplicate cache layer {prefix}")
@@ -298,22 +322,27 @@ class DeepseekV41Cache(nn.Module, AttentionLayerBase):
 
     def field(self, bank, offset, width):
         """Address a logical state field within the physical pages for this layer."""
+        storage, start = self.field_storage(bank, offset, width)
+        return storage[:, start : start + width]
+
+    def field_storage(self, bank, offset, width):
+        """Return the backing storage and element offset without a full-cache slice."""
         key, value = self.pages()
         if bank == 0 and 0 <= offset < self.dim and offset + width <= self.dim:
-            return key[:, offset : offset + width]
+            return key, offset
         if bank == 0 and offset == self.dim and self.source_ratio:
             values = value.view(torch.float32) if self.source_ratio > 1 else value
-            return values[:, :width]
+            return values, 0
         if bank == 1 and offset == 0 and self.source_ratio > 1:
-            return value.view(torch.float32)[:, self.dim : self.dim + width]
+            return value.view(torch.float32), self.dim
         if bank == 1 and offset == self.dim and self.source_ratio:
             keys = key if self.source_ratio > 1 else value
-            return keys[:, self.dim : self.dim + width]
+            return keys, self.dim
         if bank == 1 and offset == self.dim + self.index_dim and width == 1 and self.token_history:
             if self.source_ratio:
                 storage = key if self.source_ratio > 1 else value
-                return storage[:, offset : offset + 2].view(torch.float32)
-            return value[:, :2].view(torch.float32)
+                return storage.view(torch.float32), offset // 2
+            return value.view(torch.float32), 0
         raise ValueError(f"Unallocated V4.1 cache field: bank={bank}, offset={offset}, width={width}")
 
     def slots(self, metadata, request_idx, positions):
@@ -334,19 +363,73 @@ class DeepseekV41Cache(nn.Module, AttentionLayerBase):
 
     def decode_read(self, md, positions, bank, offset, width):
         """Read fixed-shape logical positions, zeroing dead rows and future slots."""
-        pos = positions.clamp(0, md.max_model_len - 1)
-        blocks = md.block_table_tensor.gather(1, pos // self.block_size).long()
-        slots = blocks * self.block_size + pos % self.block_size
-        pages = self.field(bank, offset, width)
-        valid = md.active[:, None] & (positions >= 0) & (positions < md.seq_lens[:, None])
-        valid = valid & (slots >= 0) & (slots < pages.shape[0])
-        safe = torch.where(valid, slots, 0)
+        if self.cache_backend is not None:
+            storage, start = self.field_storage(bank, offset, width)
+            result = self.cache_backend.read(
+                storage, positions, md.block_table_tensor, md.seq_lens, md.active, start, width
+            )
+            if result is not None:
+                return result
+        if self.cache_backend is not None:
+            # Gather the requested rows before slicing their fields. Slicing
+            # the complete NPU cache can materialize hundreds of MiB per read.
+            pages, start = self.field_storage(bank, offset, width)
+            if positions.numel() * pages.shape[1] > pages.shape[0] * width:
+                pages, start = self.field(bank, offset, width), 0
+        else:
+            pages, start = self.field(bank, offset, width), 0
+        fused = self._decode_read_slots(md, positions, pages.shape[0])
+        if fused is None:
+            pos = positions.clamp(0, md.max_model_len - 1)
+            blocks = md.block_table_tensor.gather(1, pos // self.block_size).long()
+            slots = blocks * self.block_size + pos % self.block_size
+            valid = md.active[:, None] & (positions >= 0) & (positions < md.seq_lens[:, None])
+            valid = valid & (slots >= 0) & (slots < pages.shape[0])
+            safe = torch.where(valid, slots, 0)
+        else:
+            safe, valid = fused
         values = pages.index_select(0, safe.flatten())
+        values = values[:, start : start + width]
         values = values.reshape(*positions.shape, width)
         return torch.where(valid[..., None], values, 0)
 
+    def _decode_read_slots(self, md, positions, storage_rows):
+        if (
+            self.slot_factory is None
+            or self.block_size != 128
+            or positions.device.type not in ("npu", "privateuseone")
+            or positions.ndim != 2
+            or positions.shape[1] % 64
+            or positions.dtype != torch.int64
+            or md.block_table_tensor.dtype != torch.int32
+            or md.seq_lens.dtype not in (torch.int32, torch.int64)
+            or md.active.dtype != torch.bool
+            or not 0 < md.block_table_tensor.shape[1] <= 512
+            or not 0 < md.max_model_len <= md.block_table_tensor.shape[1] * 128
+            or not 0 < storage_rows < 2**31
+        ):
+            return None
+        key = (md.block_table_tensor.shape[1], md.max_model_len, storage_rows)
+        if key not in self.slot_backends:
+            if len(self.slot_backends) >= 8:
+                return None
+            self.slot_backends[key] = self.slot_factory(*key)
+            logger.info_once(
+                "V4.1 CANNBot read slots: position_dtype=%s length_dtype=%s table_width=%d max_length=%d",
+                positions.dtype,
+                md.seq_lens.dtype,
+                key[0],
+                key[1],
+                scope="process",
+            )
+        return self.slot_backends[key](positions, md.block_table_tensor, md.seq_lens, md.active)
+
     def decode_write(self, md, values, bank, offset, enabled):
         """Preserve cache bits for inactive rows, including a live write to slot zero."""
+        if self.cache_backend is not None:
+            storage, start = self.field_storage(bank, offset, values.shape[-1])
+            if self.cache_backend.write(storage, values, md.slot_mapping, enabled & md.active, start):
+                return
         page = self.field(bank, offset, values.shape[-1])
         values = values.to(page.dtype)
         valid = enabled & md.active & (md.slot_mapping >= 0) & (md.slot_mapping < page.shape[0])
@@ -376,9 +459,33 @@ class DeepseekV41RMSNorm(nn.Module):
         super().__init__()
         self.weight = nn.Parameter(torch.empty(dim))
         self.eps = eps
+        self.cannbot_factory = None
+        self.cannbot_backends = {}
 
     def forward(self, x):
+        if (
+            self.cannbot_factory is not None
+            and x.dtype == torch.bfloat16
+            and x.device.type in ("npu", "privateuseone")
+            and self.weight.dtype in (torch.bfloat16, torch.float32)
+        ):
+            dtype = self.weight.dtype
+            if dtype not in self.cannbot_backends:
+                self.cannbot_backends[dtype] = self.cannbot_factory(self.weight.numel(), self.eps, dtype)
+            return self.cannbot_backends[dtype](x, self.weight)
         return rms_norm(x, self.weight, self.eps)
+
+
+def configure_cannbot_norms(module, vllm_config):
+    additional = getattr(vllm_config, "additional_config", None) or {}
+    if not validate_additional_config_bool(additional.get("v41_cannbot_norm", False), "v41_cannbot_norm"):
+        return
+    from .cannbot_norm import MAX_DIMENSION, VECTOR_WIDTH, RMSNorm
+
+    for norm in module.modules():
+        if isinstance(norm, DeepseekV41RMSNorm) and 0 < norm.weight.numel() <= MAX_DIMENSION:
+            if norm.weight.numel() % VECTOR_WIDTH == 0:
+                norm.cannbot_factory = RMSNorm
 
 
 def rotary_frequencies(config, compressed):
@@ -516,7 +623,9 @@ class DeepseekV41Attention(nn.Module):
         self.tp = tp
         self.dim = config.head_dim
         self.rope_dim = config.qk_rope_head_dim
+        self.init_rotary_backend(vllm_config)
         self.attention_kernel = DeepseekV41NativeAttention()
+        self.init_quantization_backends(vllm_config)
         self.owns_kv = layer_id in config.kv_source_layer_ids
         self.owns_index = layer_id in config.index_source_layer_ids
         quant_config = vllm_config.quant_config
@@ -573,6 +682,16 @@ class DeepseekV41Attention(nn.Module):
             source_ratio=self.ratio if self.owns_kv else 0,
             token_history=layer_id == 0,
         )
+        self.index_backend = None
+        additional = getattr(vllm_config, "additional_config", None) or {}
+        if validate_additional_config_bool(additional.get("v41_cannbot_index", False), "v41_cannbot_index"):
+            if self.owns_index and self.ratio and config.index_head_dim == 128:
+                from .cannbot_index import PagedIndexBackend
+
+                stride = 1 << (self.dim + config.index_head_dim - 1).bit_length()
+                self.index_backend = PagedIndexBackend(
+                    stride, self.dim, self.index_heads, self.cache.block_size, self.ratio
+                )
         self.register_buffer(
             "frequencies", rotary_frequencies(config, self.ratio > 0).to(self.attn_sink.device), persistent=False
         )
@@ -584,8 +703,34 @@ class DeepseekV41Attention(nn.Module):
 
     def rotate(self, x, positions, inverse=False):
         phases = positions.float().unsqueeze(-1) * self.frequencies
-        apply_rotary_emb_real(x[..., -self.rope_dim :], phases.cos(), phases.sin(), inverse=inverse)
+        cosine, sine = phases.cos(), phases.sin()
+        heads = x.shape[2] if x.ndim == 4 else 1
+        if (
+            self.rope_factory is not None
+            and self.rope_dim == 64
+            and x.ndim in (3, 4)
+            and x.shape[0] == 1
+            and x.shape[1] <= 48
+            and (x.shape[-1], heads) in ((128, 1), (128, 8), (128, 32), (512, 1), (512, 16), (512, 64))
+            and x.is_contiguous()
+            and x.dtype == torch.bfloat16
+            and x.device.type in ("npu", "privateuseone")
+        ):
+            key = (x.shape[-1], heads, inverse)
+            if key not in self.rope_backends:
+                self.rope_backends[key] = self.rope_factory(*key)
+            return self.rope_backends[key](x, cosine, sine)
+        apply_rotary_emb_real(x[..., -self.rope_dim :], cosine, sine, inverse=inverse)
         return x
+
+    def init_rotary_backend(self, vllm_config):
+        self.rope_factory = None
+        self.rope_backends = {}
+        additional = getattr(vllm_config, "additional_config", None) or {}
+        if validate_additional_config_bool(additional.get("v41_cannbot_rope", False), "v41_cannbot_rope"):
+            from .cannbot_rope import RotaryApply
+
+            self.rope_factory = RotaryApply
 
     def _compressed(self, x, positions, metadata, request_idx, request, shared):
         if not self.owns_kv:
@@ -622,9 +767,9 @@ class DeepseekV41Attention(nn.Module):
             latent = compressor.norm(latent)
             keys = self.indexer.k_norm(self.indexer.wk(latent))
             self.rotate(keys.unsqueeze(0), completed + 1 - ratio)
-            keys = fp4_quant_dequant(keys, 32, scale_format="e8m0")
+            keys = self._quantize_fp4(keys, 32, scale_format="e8m0")
             self.rotate(latent.unsqueeze(0), completed + 1 - ratio)
-            latent = fp4_quant_dequant(latent, 16, scale_format="e4m3")
+            latent = self._quantize_fp4(latent, 16, scale_format="e4m3")
             if metadata is not None:
                 slots = self.cache.slots(metadata, request_idx, completed)
                 self.cache.write_slots(slots, latent, 0, dim)
@@ -669,7 +814,7 @@ class DeepseekV41Attention(nn.Module):
             rows = slice(start, start + tile_rows)
             query = q[rows]
             self.rotate(query.unsqueeze(0), positions[rows])
-            query = fp4_quant_dequant(query, 32, scale_format="e8m0")
+            query = self._quantize_fp4(query, 32, scale_format="e8m0")
             per_head = torch.einsum("shd,td->sht", query, shared.index_keys)
             per_head.relu_()
             per_head = per_head.to(torch.promote_types(per_head.dtype, weights.dtype))
@@ -710,8 +855,8 @@ class DeepseekV41Attention(nn.Module):
         keys = self.indexer.k_norm(self.indexer.wk(latent))
         self.rotate(keys.unsqueeze(0), group_start)
         self.rotate(latent.unsqueeze(0), group_start)
-        keys = fp4_quant_dequant(keys, 32, scale_format="e8m0")
-        latent = fp4_quant_dequant(latent, 16, scale_format="e4m3")
+        keys = self._quantize_fp4(keys, 32, scale_format="e8m0")
+        latent = self._quantize_fp4(latent, 16, scale_format="e4m3")
         self.cache.decode_write(md, latent, 0, dim, complete)
         self.cache.decode_write(md, keys, 1, dim, complete)
         runtime.source_cache = self.cache
@@ -731,16 +876,31 @@ class DeepseekV41Attention(nn.Module):
         indexer = self.indexer
         q = indexer.wq_b(qr)[0].view(-1, self.index_heads, self.config.index_head_dim)
         self.rotate(q.unsqueeze(0), pos)
-        q = fp4_quant_dequant(q, 32, scale_format="e8m0")
+        q = self._quantize_fp4(q, 32, scale_format="e8m0")
         weights = indexer.weights_proj(x)[0] * (self.config.index_head_dim**-0.5 * self.config.index_n_heads**-0.5)
-        parts = []
-        for tile in ends.split(_DECODE_INDEX_TILE_KEYS, dim=-1):
-            keys = runtime.source_cache.decode_read(
-                runtime.source_decode, tile, 1, self.dim, self.config.index_head_dim
+        scores = None
+        if self.index_backend is not None:
+            storage, offset = runtime.source_cache.field_storage(1, self.dim, self.config.index_head_dim)
+            source_md = runtime.source_decode
+            scores = self.index_backend(
+                storage,
+                q,
+                weights,
+                source_md.block_table_tensor,
+                source_md.seq_lens,
+                source_md.active,
+                offset,
+                capacity,
             )
-            per_head = torch.einsum("bhd,btd->bht", q, keys.to(x.dtype))
-            parts.append((per_head.relu_() * weights.unsqueeze(-1)).sum(1))
-        scores = parts[0] if len(parts) == 1 else torch.cat(parts, dim=-1)
+        if scores is None:
+            parts = []
+            for tile in ends.split(_DECODE_INDEX_TILE_KEYS, dim=-1):
+                keys = runtime.source_cache.decode_read(
+                    runtime.source_decode, tile, 1, self.dim, self.config.index_head_dim
+                )
+                per_head = torch.einsum("bhd,btd->bht", q, keys.to(x.dtype))
+                parts.append((per_head.relu_() * weights.unsqueeze(-1)).sum(1))
+            scores = parts[0] if len(parts) == 1 else torch.cat(parts, dim=-1)
         if self.tp > 1 and not self.dsa_cp:
             scores = tensor_model_parallel_all_reduce(scores)
         lengths = torch.where(md.active, md.seq_lens // self.ratio, 0)[:, None]
@@ -789,7 +949,7 @@ class DeepseekV41Attention(nn.Module):
         raw = self.kv_norm(self.wkv(gathered)[0])
         self.rotate(q.unsqueeze(0), pos)
         self.rotate(raw.unsqueeze(0), full_pos)
-        self.cache.decode_write(full_md, fp8_quant_dequant(raw, 32), 0, 0, full_md.active)
+        self.cache.decode_write(full_md, self._quantize_fp8(raw, 32), 0, 0, full_md.active)
         extra = 0
         if self.ratio:
             self._decode_compressed(gathered, full_pos, full_md, runtime)
@@ -852,7 +1012,7 @@ class DeepseekV41Attention(nn.Module):
             positions = torch.arange(request.start_pos, request.seq_len, device=hidden_states.device)
             kv = raw_kv[begin:end]
             self.rotate(kv.unsqueeze(0), positions)
-            kv = fp8_quant_dequant(kv, 32)
+            kv = self._quantize_fp8(kv, 32)
             first = max(0, request.start_pos - self.config.sliding_window + 1)
             if metadata is not None:
                 slots = self.cache.slots(metadata, request_idx, positions)
@@ -913,6 +1073,38 @@ class DeepseekV41Attention(nn.Module):
             output[rows] = attended
         return self._project_output(output, hidden_states.dtype)
 
+    def init_quantization_backends(self, vllm_config):
+        self.fp8_backend = None
+        self.fp4_backends = {}
+        additional = getattr(vllm_config, "additional_config", None) or {}
+        if validate_additional_config_bool(additional.get("v41_cannbot_fp8", False), "v41_cannbot_fp8"):
+            from .cannbot_quant import FP8QuantDequant
+
+            self.fp8_backend = FP8QuantDequant()
+        if validate_additional_config_bool(additional.get("v41_cannbot_fp4", False), "v41_cannbot_fp4"):
+            from .cannbot_fp4 import FP4QuantDequant
+
+            self.fp4_backends = {
+                (32, "e8m0"): FP4QuantDequant(32, "e8m0"),
+                (16, "e4m3"): FP4QuantDequant(16, "e4m3"),
+            }
+
+    def _quantize_fp4(self, x, block_size=32, *, scale_format="e8m0"):
+        backend = self.fp4_backends.get((block_size, scale_format))
+        if backend is not None and x.dtype == torch.bfloat16 and x.device.type in ("npu", "privateuseone"):
+            return backend(x)
+        return fp4_quant_dequant(x, block_size, scale_format=scale_format)
+
+    def _quantize_fp8(self, x, block_size=32, *, inplace=False):
+        if (
+            self.fp8_backend is not None
+            and block_size == 32
+            and x.dtype == torch.bfloat16
+            and x.device.type in ("npu", "privateuseone")
+        ):
+            return self.fp8_backend(x, inplace=inplace)
+        return fp8_quant_dequant(x, block_size, inplace=inplace)
+
     def _project_output(self, output, dtype):
         if self.dsa_cp:
             # Exchange local tokens and complete heads for complete tokens and
@@ -922,7 +1114,7 @@ class DeepseekV41Attention(nn.Module):
             output = torch.empty_like(send)
             dist.all_to_all_single(output, send, group=self.sequence_group.device_group)
         output = output.view(-1, self.groups, self.local_heads * self.dim // self.groups)
-        output = _quantize_projection_input(output)
+        output = _quantize_projection_input(output, self._quantize_fp8)
         projection = self.wo_a.weight.view(self.groups, self.config.o_lora_rank, -1)
         output = torch.einsum("sgd,grd->sgr", output, projection).flatten(1)
         if self.sequence_group is not None:

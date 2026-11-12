@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -50,6 +50,9 @@ def test_tiled_index_exactly_matches_dense(ratio, dsa_cp, stage, monkeypatch):
     source, layer_id = {"no_source": (-1, 2), "before_source": (2, 1), "source": (2, 2), "after_source": (2, 3)}[stage]
     layer = SimpleNamespace(
         owns_index=True,
+        fp4_backends={},
+        rope_factory=None,
+        rope_backends={},
         index_heads=heads,
         tp=2,
         dsa_cp=dsa_cp,
@@ -67,6 +70,7 @@ def test_tiled_index_exactly_matches_dense(ratio, dsa_cp, stage, monkeypatch):
         frequencies=torch.linspace(0.01, 1, dim // 2),
         rope_dim=dim,
     )
+    layer._quantize_fp4 = MethodType(attention.DeepseekV41Attention._quantize_fp4, layer)
     layer.rotate = lambda tensor, pos: attention.DeepseekV41Attention.rotate(layer, tensor, pos)
     mask = (torch.arange(rows)[:, None] + torch.arange(count)) % 3 != 0 if stage == "after_source" else None
     full = attention.SharedRequestAttention(compressed=keys, index_keys=keys, candidates=mask)

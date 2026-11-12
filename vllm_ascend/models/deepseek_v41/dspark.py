@@ -23,9 +23,9 @@ from .attention import (
     DeepseekV41Metadata,
     DeepseekV41RMSNorm,
     RequestSpan,
+    configure_cannbot_norms,
     rotary_frequencies,
 )
-from .attention_ops import fp8_quant_dequant
 from .core import hc_pre, make_identity_pre_mix
 from .engram import IndexedMmapStore
 from .fused_weights import load_indexed_v41_weights
@@ -116,9 +116,11 @@ class DSparkAttention(DeepseekV41Attention):
         self.groups = config.o_groups // self.tp
         self.dsa_cp = False
         self.attention_kernel = DeepseekV41NativeAttention()
+        self.init_quantization_backends(vllm_config)
         self.sequence_group = None
         self.dim = config.head_dim
         self.rope_dim = config.qk_rope_head_dim
+        self.init_rotary_backend(vllm_config)
         self.config = config
         quant = vllm_config.quant_config
         args = {"bias": False, "quant_config": quant}
@@ -152,7 +154,7 @@ class DSparkAttention(DeepseekV41Attention):
     def project_kv(self, states, positions):
         kv = self.kv_norm(self.wkv(states)[0])
         self.rotate(kv.unsqueeze(0), positions.reshape(-1))
-        return fp8_quant_dequant(kv, 32)
+        return self._quantize_fp8(kv, 32)
 
     def store_context(self, states, positions, slots):
         kv = self.project_kv(states, positions)
@@ -215,6 +217,7 @@ class DSparkStage(DeepseekV41Block):
         nn.Module.__init__(self)
         self.config = config
         prefix = f"mtp.{stage}"
+        self.init_hc_backend(vllm_config)
         self.attn = DSparkAttention(config, vllm_config, prefix + ".attn")
         expert_config = copy(config)
         expert_config.n_routed_experts = config.dspark_n_routed_experts
@@ -281,6 +284,7 @@ class DeepseekV41DSparkForCausalLM(nn.Module):
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.model_path = Path(vllm_config.model_config.model)
         self.original_fp8 = getattr(vllm_config.model_config, "quantization", None) == "deepseek_v4_fp8"
+        configure_cannbot_norms(self, vllm_config)
 
     def embed_input_ids(self, input_ids):
         return self.mtp[0].embed(input_ids)

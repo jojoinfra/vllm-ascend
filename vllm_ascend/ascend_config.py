@@ -440,6 +440,25 @@ class AscendConfig:
 
     # ---- derived fields: sentinel default, after-validator overwrites ----
     enable_shared_expert_dp: bool = False
+    # Experimental HC4 gates/Sinkhorn fusion using CANNBotDSL 0.6.0 on A5.
+    # Default off until NPU numerical, graph and end-to-end validation passes.
+    v41_cannbot_hc: bool = False
+    # Direct cache writes and short compressor reads; graph-tested A5 prototype.
+    v41_cannbot_cache: bool = False
+    # Integer read-slot/mask fusion for 64-aligned decode gathers.
+    v41_cannbot_cache_slots: bool = False
+    # BF16 E4M3 activation QDQ fusion; disabled until explicitly selected.
+    v41_cannbot_fp8: bool = False
+    # BF16 E2M1 QDQ with original index/compressed-KV scale formats.
+    v41_cannbot_fp4: bool = False
+    # BF16 RMS normalization; opt-in with a one-BF16-ULP numerical bound.
+    v41_cannbot_norm: bool = False
+    # Adjacent-pair BF16 RoPE application with unchanged FP32 sin/cos.
+    v41_cannbot_rope: bool = False
+    # HC4 BF16 pre/post residual mixing with the original NPU sum order.
+    v41_cannbot_residual: bool = False
+    # Device-bounded paged index scores; experimental and opt-in.
+    v41_cannbot_index: bool = False
     enable_sp_by_pass: bool = False
     enable_sparse_sfa_c8: bool = False
     enable_sparse_li_c8: bool = False

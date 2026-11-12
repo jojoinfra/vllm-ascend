@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import pytest
 import torch
@@ -43,6 +43,8 @@ def test_decode_index_selects_across_key_tiles(monkeypatch, ratio, tensor_device
     )
     layer = SimpleNamespace(
         owns_index=True,
+        index_backend=None,
+        fp4_backends={},
         ratio=ratio,
         layer_id=2,
         dim=dim,
@@ -52,6 +54,7 @@ def test_decode_index_selects_across_key_tiles(monkeypatch, ratio, tensor_device
         rotate=lambda *args: None,
         indexer=SimpleNamespace(wq_b=lambda v: (v, None), weights_proj=lambda v: (weights, None)),
     )
+    layer._quantize_fp4 = MethodType(attention.DeepseekV41Attention._quantize_fp4, layer)
     runtime = SimpleNamespace(source_cache=SimpleNamespace(decode_read=read), source_decode=md)
     monkeypatch.setattr(attention, "_DECODE_INDEX_TILE_KEYS", 4)
     attention.DeepseekV41Attention._decode_index(layer, q, q.clone(), md.seq_lens - 1, md, runtime)

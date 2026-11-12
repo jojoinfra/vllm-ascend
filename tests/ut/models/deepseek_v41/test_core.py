@@ -12,6 +12,7 @@ from vllm_ascend.models.deepseek_v41.core import (
     DeepseekV41HCMix,
     DeepseekV41ResidualSublayer,
     clipped_swiglu,
+    hc_mixes,
     hc_post,
     hc_pre,
     hc_split_sinkhorn,
@@ -54,6 +55,30 @@ def test_hc_projection_normalizes_jointly_over_all_residual_copies():
     # Joint RMS is sqrt((9 + 16) / 4) = 2.5, not sqrt(12.5).
     expected = torch.tensor([[1 / (1 + math.exp(-2.4)), 0.5]])
     torch.testing.assert_close(pre, expected)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_hc_mixes_passes_fp32_projection_to_explicit_sinkhorn(dtype):
+    states = torch.arange(1, 25, dtype=torch.float32).reshape(3, 4, 2).to(dtype)
+    fn = torch.arange(192, dtype=torch.float32).reshape(24, 8) / 192
+    scale = torch.tensor([0.3, 0.7, 1.1])
+    base = torch.linspace(-0.5, 0.5, 24)
+    expected = hc_mixes(states, fn, scale, base, norm_eps=1e-4, hc_eps=1e-3, sinkhorn_iters=3)
+    seen = []
+
+    def sinkhorn(mixes, actual_scale, actual_base):
+        assert mixes.dtype == torch.float32
+        assert actual_scale is scale and actual_base is base
+        flattened = states.float().flatten(-2)
+        normalized_projection = (flattened @ fn.T) / (flattened.square().mean(-1, keepdim=True) + 1e-4).sqrt()
+        torch.testing.assert_close(mixes, normalized_projection)
+        seen.append(mixes)
+        return hc_split_sinkhorn(mixes, actual_scale, actual_base, 4, 3, 1e-3)
+
+    actual = hc_mixes(states, fn, scale, base, 1e-4, 1e-3, 3, sinkhorn=sinkhorn)
+    assert len(seen) == 1
+    for value, reference in zip(actual, expected, strict=True):
+        torch.testing.assert_close(value, reference)
 
 
 def test_hc_post_uses_comb_input_to_output_direction():
