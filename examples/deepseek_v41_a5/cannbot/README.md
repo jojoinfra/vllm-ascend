@@ -13,6 +13,8 @@ rounds average **16.52 output tokens/s**, and three optimized rounds average
 eight-request scenario remains below the target. These are complete batch
 measurements, including prefill, on the same TP4/EP4 cards and FP8/FP4 weights,
 with approximately 100 input tokens and exactly 256 output tokens per request.
+The subsequent **8192-input-token, eight-request** validation measured only
+**1.53x** throughput improvement; its separate results are recorded below.
 
 | Workload and candidate configuration | Initial mean tokens/s | Candidate mean tokens/s | Observed ratio |
 | --- | ---: | ---: | ---: |
@@ -66,6 +68,45 @@ python3 examples/deepseek_v41_a5/cannbot/run_fixed.py \
   --scenario-dir /home/jojo/dsv41-cannbot-10x-20261111/scenario-npu1-4-c16-autoregressive-v3 \
   --output-dir /path/to/new-results-directory
 ```
+
+## Eight-request validation with 8192 input tokens
+
+The unchanged final graph16 v1 image was compared with the pinned initial image
+using exactly **8192 input tokens including the chat template**, **256 output
+tokens**, eight simultaneous client requests and three rounds per image. The
+eight prompts are deterministic synthetic Chinese library operations documents;
+both images use identical frozen messages and token-ID hashes. Each round warms
+up with an 8192-token prompt and 64 output tokens. Sampling, TP4/EP4, physical
+cards1–4, memory utilization0.93, maximum sequences16 and the 512-token scheduler
+batch limit are unchanged. This is a validation of the existing optimized
+configuration, with no additional long-context tuning.
+
+| Metric, mean of three rounds | Initial | Optimized |
+| --- | ---: | ---: |
+| Complete-batch output throughput, tokens/s | 11.07 | 16.92 |
+| Client time to first token, seconds | 77.11 | 50.42 |
+| Client time per subsequent output token, ms | 358.30 | 269.39 |
+
+The observed throughput improvement is **1.528x (+52.8%)**, below 10x for this
+workload. Initial rounds measured 11.02, 11.07 and 11.13 tokens/s; optimized
+rounds measured 16.86, 17.00 and 16.90. All 48 measured requests completed with
+8192 prompt tokens and 256 output tokens. All six rounds had zero prompt-cache
+hits and zero preemptions. Sampled text outputs were inspected for basic sanity; this
+does not constitute a new long-context accuracy evaluation.
+
+TPOT is computed for each request as `(latency - TTFT) / 255` and then averaged.
+It includes delays from other requests' interleaved chunked prefill, so it is
+not an isolated decode-kernel measurement. These results do not reproduce the
+short-input c16 graph-coverage speedup. Runs were sequential on the same shared
+host; the measured services were stopped and cards1–4 released afterward.
+
+The evidence directory is
+`/home/jojo/dsv41-cannbot-10x-20261111/long8k-v1/`. `results.json` contains the
+validated comparison, `baseline-c8-rounds/` and `candidate-c8-rounds/` contain
+every raw round, and `scenario-c8-baseline/` and `scenario-c8-candidate/` retain
+the exact prompts and hashes. `prepare_scenarios.py` records input construction;
+`compare.py` verifies workload equality, runtime differences, lengths and cache
+counters. Only c8 results are included, as requested.
 
 ## Optimization history
 
