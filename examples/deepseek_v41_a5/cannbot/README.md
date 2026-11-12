@@ -515,3 +515,13 @@ at once, with independent cache salts, then runs the frozen image request.
 The default remains eight serial text requests. The report records concurrency,
 repetitions, all sixteen answers and their original sample indices. This is
 still an eight-problem regression, not a broader accuracy evaluation.
+
+## TP1 / DP4，8K、8 并发部署验证
+
+四张 A5 上的 TP1 / DP4 / EP4 已通过真实权重文本、图片和八题并发回归。
+64K 上下文需显式 `--gpu-memory-utilization 0.94`；0.93 的启动失败已保留。
+原始三轮加分布复核三轮，全部六轮平均吞吐 58.80 tok/s，中位数 50.61；
+相对优化后 TP4 的均值 16.92，平均为 3.48 倍。吞吐范围 50.04–77.66，
+补测确认较快轮次请求均匀分到四个 DP 实例，较慢轮次分布不均。
+部署命令、比较范围和证据见
+[中文 TP1 部署验证](../../../docs/source/tutorials/models/DeepSeek-V4.1-Flash-A5-TP1.md)。

@@ -78,6 +78,11 @@ def validate_parallel_layout(settings, hardware):
 
 def validate_runtime_variant(settings, scenario):
     variant = scenario.get("runtime_variant", {})
+    if "gpu_memory_utilization" in variant:
+        expected = variant["gpu_memory_utilization"]
+        actual = float(settings.get("--gpu-memory-utilization", "nan"))
+        if not 0 < expected <= 1 or actual != expected:
+            raise RuntimeError("GPU memory utilization differs from the declared runtime variant")
     if variant.get("speculation") == "disabled":
         if json.loads(settings.get("--speculative-config", "null")) is not None:
             raise RuntimeError("Scenario requires speculative decoding to be disabled")

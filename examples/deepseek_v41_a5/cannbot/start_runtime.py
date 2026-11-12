@@ -25,6 +25,7 @@ def main():
     parser.add_argument("--deployment", type=Path, required=True)
     parser.add_argument("--decode-mode", choices=("dspark", "autoregressive"), default="dspark")
     parser.add_argument("--parallel-layout", choices=("tp4", "dp4"), default="tp4")
+    parser.add_argument("--gpu-memory-utilization", type=float, help="Explicit override of the initial memory fraction")
     parser.add_argument("--autoregressive-max-requests", type=int, choices=(8, 16), default=8)
     parser.add_argument("--enable-hc", action="store_true")
     parser.add_argument("--enable-cache", action="store_true")
@@ -45,6 +46,8 @@ def main():
         raise ValueError("The 16-request graph experiment requires autoregressive decoding with TP4")
     if not 1 <= args.port <= 65535:
         raise ValueError("Port must be in 1..65535")
+    if args.gpu_memory_utilization is not None and not 0 < args.gpu_memory_utilization <= 1:
+        raise ValueError("GPU memory utilization must be in (0, 1]")
     if args.profile_delay_iterations < 0 or args.profile_max_iterations < 0:
         raise ValueError("Profiler iteration controls must be nonnegative")
     if subprocess.run(["docker", "container", "inspect", args.name], capture_output=True).returncode == 0:
@@ -113,6 +116,8 @@ def main():
         args.profile_dir.mkdir(parents=True, exist_ok=False)
         command += ["-v", f"{args.profile_dir.resolve()}:/profiles"]
     command += ["--entrypoint", "bash", args.image, "/deployment/serve.sh"]
+    if args.gpu_memory_utilization is not None:
+        command += ["--gpu-memory-utilization", str(args.gpu_memory_utilization)]
     if args.profile_dir:
         command += [
             "--profiler-config",

@@ -3,6 +3,7 @@
 """Benchmark metadata must describe actual final CLI options and topology."""
 
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
@@ -77,3 +78,38 @@ def test_declared_autoregressive_variant_rejects_speculation_and_wrong_buckets()
         module.validate_runtime_variant(
             settings | {"--compilation-config": '{"cudagraph_capture_sizes":[24,48]}'}, scenario
         )
+
+
+def test_declared_memory_fraction_requires_matching_runtime_value():
+    module = benchmark_module()
+    scenario = dict(runtime_variant=dict(gpu_memory_utilization=0.94))
+    module.validate_runtime_variant({"--gpu-memory-utilization": "0.94"}, scenario)
+    for settings in ({}, {"--gpu-memory-utilization": "0.93"}, {"--gpu-memory-utilization": "nan"}):
+        with pytest.raises(RuntimeError, match="GPU memory utilization"):
+            module.validate_runtime_variant(settings, scenario)
+
+
+@pytest.mark.parametrize("fraction", ["0", "-0.1", "1.01", "nan", "inf"])
+def test_launcher_rejects_invalid_memory_fraction_before_docker(monkeypatch, fraction):
+    source = Path(__file__).resolve().parents[4] / "examples/deepseek_v41_a5/cannbot/start_runtime.py"
+    spec = importlib.util.spec_from_file_location("cannbot_start_runtime", source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(source),
+            "--image",
+            "unused",
+            "--name",
+            "unused",
+            "--deployment",
+            "/unused",
+            "--gpu-memory-utilization",
+            fraction,
+        ],
+    )
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: pytest.fail("Docker must not be invoked"))
+    with pytest.raises(ValueError, match="GPU memory utilization"):
+        module.main()
